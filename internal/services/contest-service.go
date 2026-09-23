@@ -246,7 +246,7 @@ func (cs *ContestService) DeleteProblem(ctx context.Context, contestID string, p
 
 	prefix := fmt.Sprintf("problems/%s/%s/", contestID, problemID)
 
-	if err := cs.s3.DeleteObject(ctx, prefix); err != nil {
+	if err := cs.s3.DeletePrefix(ctx, prefix); err != nil {
 		log.Errorf("failed to delete S3 folder for problem %s: %v", problemID, err)
 	}
 
