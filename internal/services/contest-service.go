@@ -301,20 +301,22 @@ func (cs *ContestService) GetContestProblem(ctx context.Context, contestID strin
 		}
 		meta.Description = desc
 	}
+	if meta.Type == models.Code && meta.TestcasesKey != ""  {
+		
+		testcaseKey := meta.TestcasesKey
+		testcase, err := cs.s3.GetObject(ctx, testcaseKey)
+		if err != nil {
+			return nil, err
+		}
+	
+		var tcArr []dto.TestCaseResponse
+		if err := json.Unmarshal([]byte(testcase), &tcArr); err != nil {
+			return nil, err
+		}
+	
+		meta.Testcases = tcArr
 
-	testcaseKey := meta.TestcasesKey
-
-	testcase, err := cs.s3.GetObject(ctx, testcaseKey)
-	if err != nil {
-		return meta, nil
 	}
-
-	var tcArr []dto.TestCaseResponse
-	if err := json.Unmarshal([]byte(testcase), &tcArr); err != nil {
-		return nil, err
-	}
-
-	meta.Testcases = tcArr
 
 	return meta, nil
 }
