@@ -290,7 +290,7 @@ func (cs *ContestService) GetContestProblemsListAdmin(ctx context.Context, conte
 	return cs.stores.Problems.GetProblemList(ctx, contestID)
 }
 
-func (cs *ContestService) GetContestProblem(ctx context.Context, contestID string, problemID string) (*dto.GetProblemStatementResponse, error) {
+func (cs *ContestService) GetContestProblem(ctx context.Context, contestID string, problemID string, includeTestcases bool) (*dto.GetProblemStatementResponse, error) {
 
 	meta, err := cs.stores.Problems.GetProblem(ctx, problemID, contestID)
 	if err != nil {
@@ -306,7 +306,7 @@ func (cs *ContestService) GetContestProblem(ctx context.Context, contestID strin
 		}
 		meta.Description = desc
 	}
-	if meta.Type == models.Code && meta.TestcasesKey != ""  {
+	if includeTestcases && meta.Type == models.Code && meta.TestcasesKey != ""  {
 		
 		testcaseKey := meta.TestcasesKey
 		testcase, err := cs.s3.GetObject(ctx, testcaseKey)

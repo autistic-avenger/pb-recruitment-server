@@ -377,7 +377,7 @@ func (cc *ContestController) GetContestProblem(ctx echo.Context) error {
 		})
 	}
 
-	problem, err := cc.contestService.GetContestProblem(ctx.Request().Context(), contestID, problemID)
+	problem, err := cc.contestService.GetContestProblem(ctx.Request().Context(), contestID, problemID, false)
 	if err != nil {
 		if err == common.ContestNotFoundError {
 			return ctx.JSON(http.StatusNotFound, map[string]string{
@@ -437,7 +437,7 @@ func (cc *ContestController) HandleGetProblemAdmin(ctx echo.Context) error {
 		})
 	}
 
-	problem, err := cc.contestService.GetContestProblem(ctx.Request().Context(), contestID, problemID)
+	problem, err := cc.contestService.GetContestProblem(ctx.Request().Context(), contestID, problemID, true)
 	if err != nil {
 		if errors.Is(err, common.ContestNotFoundError) {
 			return ctx.JSON(http.StatusNotFound, map[string]string{
