@@ -171,20 +171,9 @@ func (cc *ContestController) HandleCreateProblem(ctx echo.Context) error {
 		})
 	}
 
-	var req dto.CreateProblemRequest
-	if err := ctx.Bind(&req); err != nil {
-		return ctx.JSON(http.StatusBadRequest, map[string]string{
-			"error": "invalid request body",
-		})
-	}
+	req := ctx.Get(common.VALIDATED_REQUEST_BODY).(*dto.CreateProblemRequest)
 
-	if req.Name == "" || req.Score <= 0 || req.Type == "" {
-		return ctx.JSON(http.StatusBadRequest, map[string]string{
-			"error": "name, score, and type are required fields",
-		})
-	}
-
-	createdProblem, err := cc.contestService.CreateProblem(ctx.Request().Context(), contestID, &req)
+	createdProblem, err := cc.contestService.CreateProblem(ctx.Request().Context(), contestID, req)
 	if err != nil {
 		return ctx.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "failed to create problem",
@@ -204,20 +193,9 @@ func (cc *ContestController) HandleUpdateProblem(ctx echo.Context) error {
 		})
 	}
 
-	var req dto.CreateProblemRequest
-	if err := ctx.Bind(&req); err != nil {
-		return ctx.JSON(http.StatusBadRequest, map[string]string{
-			"error": "invalid request body",
-		})
-	}
+	req := ctx.Get(common.VALIDATED_REQUEST_BODY).(*dto.CreateProblemRequest)
 
-	if req.Name == "" || req.Score <= 0 || req.Type == "" {
-		return ctx.JSON(http.StatusBadRequest, map[string]string{
-			"error": "name, score, and type are required fields",
-		})
-	}
-
-	updatedProblem, err := cc.contestService.UpdateProblem(ctx.Request().Context(), contestID, problemID, &req)
+	updatedProblem, err := cc.contestService.UpdateProblem(ctx.Request().Context(), contestID, problemID, req)
 	if err != nil {
 		return ctx.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "failed to update problem",

@@ -124,8 +124,8 @@ func (cs *ContestService) CreateProblem(ctx context.Context, contestID string, r
 		testcasesKey := fmt.Sprintf("problems/%s/%s/testcases.json", contestID, problem.ID)
 		answersKey := fmt.Sprintf("problems/%s/%s/answers.json", contestID, problem.ID)
 
-		var tcArray []map[string]interface{}
-		var ansArray []string
+		tcArray := []map[string]interface{}{}
+		ansArray := []string{}
 
 		for i, tc := range req.Testcases {
 			tcArray = append(tcArray, map[string]interface{}{
@@ -168,7 +168,7 @@ func (cs *ContestService) UpdateProblem(ctx context.Context, contestID string, p
 	s3Key := meta.Description
 	if s3Key == "" || !strings.HasPrefix(s3Key, "problems/") {
 		// Create new S3 key for NULL/empty descriptions or legacy direct descriptions
-		s3Key = fmt.Sprintf("problems/%s/%s.json", contestID, problemID)
+		s3Key = fmt.Sprintf("problems/%s/%s/description.json", contestID, problemID)
 	}
 
 	payload := map[string]string{
@@ -190,8 +190,8 @@ func (cs *ContestService) UpdateProblem(ctx context.Context, contestID string, p
 		testcasesKey = fmt.Sprintf("problems/%s/%s/testcases.json", contestID, problemID)
 		answersKey := fmt.Sprintf("problems/%s/%s/answers.json", contestID, problemID)
 
-		var tcArray []map[string]interface{}
-		var ansArray []string
+		tcArray := []map[string]interface{}{}
+		ansArray := []string{}
 
 		for i, tc := range req.Testcases {
 			tcArray = append(tcArray, map[string]interface{}{
@@ -249,11 +249,12 @@ func (cs *ContestService) DeleteProblem(ctx context.Context, contestID string, p
 		log.Errorf("failed to delete S3 folder for problem %s: %v", problemID, err)
 	}
 
-	objectKey := fmt.Sprintf("problems/%s/%s.json",contestID,problemID)
-	if err := cs.s3.DeleteObject(ctx,objectKey);err !=nil {
-		log.Errorf("failed to delete S3 Object for problem %s: %v",problemID,err)
+	// Pre-PR#42 rows stored the description at a flat key outside the prefix above.
+	// Still swept for those; removable once no problem row predates the nested layout.
+	objectKey := fmt.Sprintf("problems/%s/%s.json", contestID, problemID)
+	if err := cs.s3.DeleteObject(ctx, objectKey); err != nil {
+		log.Errorf("failed to delete S3 Object for problem %s: %v", problemID, err)
 	}
-
 
 	return nil
 }
@@ -306,21 +307,19 @@ func (cs *ContestService) GetContestProblem(ctx context.Context, contestID strin
 		}
 		meta.Description = desc
 	}
-	if includeTestcases && meta.Type == models.Code && meta.TestcasesKey != ""  {
-		
-		testcaseKey := meta.TestcasesKey
-		testcase, err := cs.s3.GetObject(ctx, testcaseKey)
-		if err != nil {
-			return nil, err
+	if includeTestcases && meta.Type == models.Code && meta.TestcasesKey != "" {
+		// ponytail: testcases are secondary data. A missing or corrupt object must not
+		// take the problem statement down with it -- log and serve the statement.
+		if testcase, err := cs.s3.GetObject(ctx, meta.TestcasesKey); err != nil {
+			log.Errorf("failed to load testcases for problem %s: %v", problemID, err)
+		} else {
+			var tcArr []dto.TestCaseResponse
+			if err := json.Unmarshal([]byte(testcase), &tcArr); err != nil {
+				log.Errorf("failed to parse testcases for problem %s: %v", problemID, err)
+			} else {
+				meta.Testcases = tcArr
+			}
 		}
-	
-		var tcArr []dto.TestCaseResponse
-		if err := json.Unmarshal([]byte(testcase), &tcArr); err != nil {
-			return nil, err
-		}
-	
-		meta.Testcases = tcArr
-
 	}
 
 	return meta, nil
@@ -356,7 +355,7 @@ func (cs *ContestService) GetProblemTestcases(ctx context.Context, contestID, pr
 		return nil, err
 	}
 
-	if meta.TestcasesKey == "" {
+	if meta.Type != models.Code || meta.TestcasesKey == "" {
 		return []dto.TestCaseResponse{}, nil
 	}
 
@@ -380,11 +379,11 @@ func (cs *ContestService) GetProblemAnswers(ctx context.Context, contestID, prob
 		return nil, err
 	}
 
-	if meta.TestcasesKey == "" {
+	if meta.Type != models.Code || meta.TestcasesKey == "" {
 		return []string{}, nil
 	}
 
-	answersKey := strings.Replace(meta.TestcasesKey, "testcases.json", "answers.json", 1)
+	answersKey := fmt.Sprintf("problems/%s/%s/answers.json", contestID, problemID)
 
 	raw, err := cs.s3.GetObject(ctx, answersKey)
 	if err != nil {

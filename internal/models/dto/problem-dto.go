@@ -26,7 +26,7 @@ type CreateProblemRequest struct {
 	Score       int                     `json:"score" validate:"required,gt=0"`
 	Type        models.SubmissionType   `json:"type" validate:"required,oneof=mcq code"`
 	Answer      []int                   `json:"answer"` // required only for MCQ
-	Testcases   []CreateTestCaseRequest `json:"testcases,omitempty"`
+	Testcases   []CreateTestCaseRequest `json:"testcases,omitempty" validate:"required_if=Type code,dive"`
 }
 
 type CreateTestCaseRequest struct {
