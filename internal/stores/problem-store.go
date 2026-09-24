@@ -144,13 +144,12 @@ func (s *ProblemStore) GetProblemList(ctx context.Context, contestID string) ([]
 
 func (s *ProblemStore) GetProblem(ctx context.Context, problemID string, contestID string) (*dto.GetProblemStatementResponse, error) {
 	const q = `
-		SELECT id, contest_id, name, description, score, type, COALESCE(testcases,'')
+		SELECT id, contest_id, name, COALESCE(description,''), score, type, COALESCE(testcases,'')
 		FROM problems
 		WHERE id = $1 AND contest_id = $2
 	`
 
 	var p dto.GetProblemStatementResponse
-	var desc sql.NullString
 
 	err := s.db.QueryRowContext(ctx, q, problemID, contestID).Scan(
 		&p.ProblemID, &p.ContestID, &p.Name, &p.Description, &p.Score, &p.Type, &p.TestcasesKey,
@@ -162,10 +161,6 @@ func (s *ProblemStore) GetProblem(ctx context.Context, problemID string, contest
 		}
 		log.Printf("problem-store: query failed: %v", err)
 		return nil, fmt.Errorf("query problem: %w", err)
-	}
-
-	if desc.Valid {
-		p.Description = desc.String
 	}
 
 	return &p, nil
