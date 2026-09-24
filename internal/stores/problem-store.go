@@ -63,7 +63,8 @@ func (s *ProblemStore) UpdateProblem(ctx context.Context, p *models.Problem) err
             type = $5,
 			answer = $6,
 			has_multiple_answers = $7,
-			description = $8
+			description = $8,
+			testcases = $9
         WHERE id = $1 AND contest_id = $2
     `
 
@@ -76,6 +77,7 @@ func (s *ProblemStore) UpdateProblem(ctx context.Context, p *models.Problem) err
 		pq.Array(p.Answer),
 		p.HasMultipleAnswers,
 		p.Description,
+		p.Testcases,
 	)
 
 	if err != nil {
