@@ -70,10 +70,11 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 
 	const countQ = `
 		SELECT COUNT(*)
-		FROM rankings
-		WHERE contest_id = $1
-		  AND hidden = false
-		  AND disqualified = false
+		FROM rankings r
+		INNER JOIN users u ON r.user_id = u.id
+		WHERE r.contest_id = $1
+		  AND r.hidden = false
+		  AND r.disqualified = false
 	`
 	var totalCount int
 	err := s.db.QueryRowContext(ctx, countQ, contestID).Scan(&totalCount) 
