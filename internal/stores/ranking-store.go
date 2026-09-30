@@ -133,6 +133,7 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 	problemScores, err := s.getProblemScores(ctx, contestID, userIDs)
 	if err != nil {
 		log.Printf("ranking-store: problem scores query failed (non-fatal): %v", err)
+		return nil, err
 	}
 
 	for i := range entries {
