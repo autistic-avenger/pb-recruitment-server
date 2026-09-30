@@ -222,7 +222,7 @@ func (s *RankingStore) getProblemScores(ctx context.Context, contestID string, u
 			&solvedAt,
 		); err != nil {
 			log.Printf("ranking-store: problem score row scan failed: %v", err)
-			continue
+			return nil, fmt.Errorf("scan problem score row: %w", err)
 		}
 
 		if solvedAt.Valid {
