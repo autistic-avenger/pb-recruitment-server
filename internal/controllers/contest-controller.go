@@ -467,3 +467,29 @@ func (cc *ContestController) GetProblemAnswers(ctx echo.Context) error {
 
 	return ctx.JSON(http.StatusOK, answers)
 }
+
+
+func (cc *ContestController) GetLeaderboard(ctx echo.Context) error {
+	contestID := ctx.Param("id")
+
+	pageStr := ctx.QueryParam("page")
+	page, err := strconv.Atoi(pageStr)
+	if err != nil {
+		page = 0
+	}
+
+	leaderboard, err := cc.contestService.GetLeaderboard(ctx.Request().Context(), contestID, page)
+	if err != nil {
+		if errors.Is(err, common.ContestNotFoundError) {
+			return ctx.JSON(http.StatusNotFound, map[string]string{
+				"error": common.ContestNotFoundError.Error(),
+			})
+		}
+		log.Errorf("failed to get leaderboard for contest %s: %v", contestID, err)
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "failed to get leaderboard",
+		})
+	}
+
+	return ctx.JSON(http.StatusOK, leaderboard)
+}

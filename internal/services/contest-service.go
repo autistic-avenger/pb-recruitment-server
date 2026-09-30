@@ -265,6 +265,10 @@ func (cs *ContestService) UpdateLeaderboardUser(ctx context.Context, contestID s
 	return cs.stores.Rankings.UpdateLeaderboardUser(ctx, contestID, userID, req)
 }
 
+func (cs *ContestService) GetLeaderboard(ctx context.Context, contestID string, page int) (*dto.GetLeaderboardResponse, error) {
+	return cs.stores.Rankings.GetLeaderboard(ctx, contestID, page)
+}
+
 func (cs *ContestService) GetProblemVisibility(ctx context.Context, contestID string, userID string) error {
 
 	contest, err := cs.GetContest(ctx, contestID, userID)

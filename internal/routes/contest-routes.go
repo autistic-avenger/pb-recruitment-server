@@ -30,9 +30,9 @@ func AddContestRoutes(
 
 	// // Get the leaderboard of a specific contest
 	// // Paginate, page=<page> and 20 entries per page
-	// e.GET("/contests/:id/leaderboard",
-	// 	contestController.GetLeaderboard,
-	// )
+	e.GET("/contests/:id/leaderboard",
+		contestController.GetLeaderboard,
+	)
 
 	// Register/Unregister the authenticated user for a specific contest
 	// Use a request body with action=register or action=unregister
