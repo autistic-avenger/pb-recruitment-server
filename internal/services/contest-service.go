@@ -317,7 +317,12 @@ func (cs *ContestService) GetContestProblem(ctx context.Context, contestID strin
 			if err := json.Unmarshal([]byte(testcase), &tcArr); err != nil {
 				log.Errorf("failed to parse testcases for problem %s: %v", problemID, err)
 			} else {
-				meta.Testcases = tcArr
+				if includeTestcases {
+					meta.Testcases = tcArr
+				} else {
+					sampleCaseCount := min(4, len(tcArr))
+					meta.Testcases = tcArr[:sampleCaseCount]
+				}   
 			}
 		}
 	}
