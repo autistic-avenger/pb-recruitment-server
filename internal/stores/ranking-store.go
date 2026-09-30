@@ -149,7 +149,7 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 				}
 			}
 			entries[i].ProblemsSolved = solved
-			entries[i].LastSubmissionTime = lastSub
+			entries[i].LastSubmissionTime = lastSub*1000 //convert s-> ms
 		}
 	}
 
