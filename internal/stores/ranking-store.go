@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"math"
 	"strings"
 )
 
@@ -94,7 +93,7 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 		return nil, fmt.Errorf("count rankings: %w", err)
 	}
 
-	totalPages := int(math.Ceil(float64(totalCount) / float64(leaderboardPageSize)))
+	totalPages := (totalCount + leaderboardPageSize - 1) / leaderboardPageSize
 
 	const entriesQ = `
 		SELECT RANK() OVER (ORDER BY r.score DESC) AS rank, r.user_id, u.name,u.usn,r.score
@@ -132,15 +131,6 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 		return nil, fmt.Errorf("rows error: %w", err)
 	}
 
-	if len(entries) == 0 {
-		return &dto.GetLeaderboardResponse{
-			Entries:    entries,
-			Page:       page,
-			TotalPages: totalPages,
-			TotalCount: totalCount,
-		}, nil
-	}
-
 	problemScores, err := s.getProblemScores(ctx, contestID, userIDs)
 	if err != nil {
 		log.Printf("ranking-store: problem scores query failed : %v", err)
@@ -154,7 +144,7 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 			var solved int
 			var lastSub int64
 			for _, ps := range scores {
-				if ps.Score == ps.MaxScore {
+				if ps.SolvedAt != nil {
 					solved++
 				}
 				if ps.SolvedAt != nil && *ps.SolvedAt > lastSub {
@@ -162,7 +152,10 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 				}
 			}
 			entries[i].ProblemsSolved = solved
-			entries[i].LastSubmissionTime = lastSub * 1000 //convert s-> ms
+			// Time at which this user reached their final score: the latest of their
+			// per-problem first solves. Resubmitting an already-solved problem must
+			// not push it later. Stays 0 for users with no accepted submission.
+			entries[i].LastSubmissionTime = lastSub
 		}
 	}
 
@@ -194,21 +187,13 @@ func (s *RankingStore) getProblemScores(ctx context.Context, contestID string, u
 			p.name,
 			p.score AS max_score,
 			COUNT(sub.id) AS attempts,
-			COALESCE(
-				CASE
-					WHEN p.type = 'mcq' THEN
-						MAX(CASE WHEN sub.status = 'accepted' THEN p.score ELSE 0 END)
-					ELSE
-						MAX(CASE WHEN sub.status = 'accepted' THEN p.score ELSE 0 END)
-				END,
-				0
-			) AS score,
+			MAX(CASE WHEN sub.status = 'accepted' THEN p.score ELSE 0 END) AS score,
 			MIN(CASE WHEN sub.status = 'accepted' THEN sub.created_at ELSE NULL END) AS solved_at
 		FROM submissions sub
 		INNER JOIN problems p ON sub.problem_id = p.id AND sub.contest_id = p.contest_id
 		WHERE sub.contest_id = $1
 		  AND sub.user_id IN (%s)
-		GROUP BY sub.user_id, sub.problem_id, p.name, p.score, p.type
+		GROUP BY sub.user_id, sub.problem_id, p.name, p.score
 		ORDER BY sub.user_id, p.name
 	`, strings.Join(placeholders, ", "))
 
@@ -238,7 +223,7 @@ func (s *RankingStore) getProblemScores(ctx context.Context, contestID string, u
 		}
 
 		if solvedAt.Valid {
-			ts := solvedAt.Int64
+			ts := solvedAt.Int64 * 1000
 			ps.SolvedAt = &ts
 		}
 

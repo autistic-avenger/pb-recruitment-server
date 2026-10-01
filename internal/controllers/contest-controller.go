@@ -494,10 +494,5 @@ func (cc *ContestController) GetLeaderboard(ctx echo.Context) error {
 	ctx.Response().Header().Set("X-Total-Pages", strconv.Itoa(leaderboard.TotalPages))
 	ctx.Response().Header().Set("X-Current-Page", strconv.Itoa(leaderboard.Page))
 
-	entries := leaderboard.Entries
-	if entries == nil {
-		entries = []dto.LeaderboardEntry{}
-	}
-
-	return ctx.JSON(http.StatusOK, entries)
+	return ctx.JSON(http.StatusOK, leaderboard.Entries)
 }
