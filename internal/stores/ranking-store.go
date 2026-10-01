@@ -138,25 +138,12 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 	}
 
 	for i := range entries {
-		uid := entries[i].UserID
-		if scores, ok := problemScores[uid]; ok {
-			entries[i].ProblemScores = scores
-			var solved int
-			var lastSub int64
-			for _, ps := range scores {
-				if ps.SolvedAt != nil {
-					solved++
-				}
-				if ps.SolvedAt != nil && *ps.SolvedAt > lastSub {
-					lastSub = *ps.SolvedAt
-				}
-			}
-			entries[i].ProblemsSolved = solved
-			// Time at which this user reached their final score: the latest of their
-			// per-problem first solves. Resubmitting an already-solved problem must
-			// not push it later. Stays 0 for users with no accepted submission.
-			entries[i].LastSubmissionTime = lastSub
+		scores, ok := problemScores[entries[i].UserID]
+		if !ok {
+			continue
 		}
+		entries[i].ProblemScores = scores
+		entries[i].ProblemsSolved, entries[i].LastSubmissionTime = summarizeSolves(scores)
 	}
 
 	return &dto.GetLeaderboardResponse{
@@ -165,6 +152,25 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 		TotalPages: totalPages,
 		TotalCount: totalCount,
 	}, nil
+}
+
+// summarizeSolves reports how many problems the user solved and the time at
+// which they reached their final score: the latest of their per-problem first
+// solves. Resubmitting an already-solved problem must not push that later.
+// A problem counts as solved only when it has an accepted submission, so a
+// zero-point problem is not mistaken for one. lastSolve is 0 when nothing was
+// solved.
+func summarizeSolves(scores []dto.ProblemScore) (solved int, lastSolve int64) {
+	for _, ps := range scores {
+		if ps.SolvedAt == nil {
+			continue
+		}
+		solved++
+		if *ps.SolvedAt > lastSolve {
+			lastSolve = *ps.SolvedAt
+		}
+	}
+	return solved, lastSolve
 }
 
 func (s *RankingStore) getProblemScores(ctx context.Context, contestID string, userIDs []string) (map[string][]dto.ProblemScore, error) {
