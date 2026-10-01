@@ -129,8 +129,9 @@ func (cs *ContestService) CreateProblem(ctx context.Context, contestID string, r
 
 		for i, tc := range req.Testcases {
 			tcArray = append(tcArray, map[string]interface{}{
-				"index": i,
-				"input": tc.Input,
+				"index":     i,
+				"input":     tc.Input,
+				"is_sample": tc.IsSample,
 			})
 
 			ansArray = append(ansArray, tc.ExpectedOutput)
@@ -195,8 +196,9 @@ func (cs *ContestService) UpdateProblem(ctx context.Context, contestID string, p
 
 		for i, tc := range req.Testcases {
 			tcArray = append(tcArray, map[string]interface{}{
-				"index": i,
-				"input": tc.Input,
+				"index":     i,
+				"input":     tc.Input,
+				"is_sample": tc.IsSample,
 			})
 
 			ansArray = append(ansArray, tc.ExpectedOutput)
@@ -307,7 +309,7 @@ func (cs *ContestService) GetContestProblem(ctx context.Context, contestID strin
 		}
 		meta.Description = desc
 	}
-	if includeTestcases && meta.Type == models.Code && meta.TestcasesKey != "" {
+	if meta.Type == models.Code && meta.TestcasesKey != "" {
 		// ponytail: testcases are secondary data. A missing or corrupt object must not
 		// take the problem statement down with it -- log and serve the statement.
 		if testcase, err := cs.s3.GetObject(ctx, meta.TestcasesKey); err != nil {
@@ -320,9 +322,14 @@ func (cs *ContestService) GetContestProblem(ctx context.Context, contestID strin
 				if includeTestcases {
 					meta.Testcases = tcArr
 				} else {
-					sampleCaseCount := min(4, len(tcArr))
-					meta.Testcases = tcArr[:sampleCaseCount]
-				}   
+					var sampleCases []dto.TestCaseResponse
+					for _, tc := range tcArr {
+						if tc.IsSample {
+							sampleCases = append(sampleCases, tc)
+						}
+					}
+					meta.Testcases = sampleCases
+				}
 			}
 		}
 	}

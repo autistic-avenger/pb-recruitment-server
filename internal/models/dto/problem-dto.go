@@ -32,10 +32,12 @@ type CreateProblemRequest struct {
 type CreateTestCaseRequest struct {
 	Input          string `json:"input" validate:"required"`
 	ExpectedOutput string `json:"expected_output" validate:"required"`
+	IsSample       bool   `json:"is_sample"`
 }
 
 type TestCaseResponse struct {
 	Index          int    `json:"index"`
 	Input          string `json:"input"`
 	ExpectedOutput string `json:"expected_output,omitempty"`
+	IsSample       bool   `json:"is_sample"`
 }
