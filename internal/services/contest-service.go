@@ -325,13 +325,33 @@ func (cs *ContestService) GetContestProblem(ctx context.Context, contestID strin
 			if err := json.Unmarshal([]byte(testcase), &tcArr); err != nil {
 				log.Errorf("failed to parse testcases for problem %s: %v", problemID, err)
 			} else {
-				if includeTestcases {
+				if includeAdminFields {
 					meta.Testcases = tcArr
 				} else {
-					var sampleCases []dto.TestCaseResponse
+					sampleCases := []dto.TestCaseResponse{}
 					for _, tc := range tcArr {
 						if tc.IsSample {
 							sampleCases = append(sampleCases, tc)
+						}
+					}
+					// A sample is only useful if the contestant can see the expected
+					// output, which lives in answers.json. Hidden cases keep theirs
+					// server-side.
+					if len(sampleCases) > 0 {
+						answersKey := fmt.Sprintf("problems/%s/%s/answers.json", contestID, problemID)
+						if raw, err := cs.s3.GetObject(ctx, answersKey); err != nil {
+							log.Errorf("failed to load answers for problem %s: %v", problemID, err)
+						} else {
+							var answers []string
+							if err := json.Unmarshal([]byte(raw), &answers); err != nil {
+								log.Errorf("failed to parse answers for problem %s: %v", problemID, err)
+							} else {
+								for i, tc := range sampleCases {
+									if tc.Index >= 0 && tc.Index < len(answers) {
+										sampleCases[i].ExpectedOutput = answers[tc.Index]
+									}
+								}
+							}
 						}
 					}
 					meta.Testcases = sampleCases
