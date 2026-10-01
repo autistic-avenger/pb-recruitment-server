@@ -1,6 +1,7 @@
 package stores
 
 import (
+	"app/internal/common"
 	"app/internal/models/dto"
 	"context"
 	"database/sql"
@@ -63,6 +64,16 @@ const leaderboardPageSize = 20
 func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, page int) (*dto.GetLeaderboardResponse, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("ranking store: db is not initialized")
+	}
+
+	const checkContestQ = `SELECT EXISTS(SELECT 1 FROM contests WHERE id = $1)`
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, checkContestQ, contestID).Scan(&exists); err != nil {
+		log.Printf("ranking-store: check contest query failed: %v", err)
+		return nil, fmt.Errorf("check contest: %w", err)
+	}
+	if !exists {
+		return nil, common.ContestNotFoundError
 	}
 
 	page = max(0, page)
