@@ -33,8 +33,19 @@ func TestCreateProblemRequestTestcaseValidation(t *testing.T) {
 			Testcases: []CreateTestCaseRequest{{Input: "5 6", ExpectedOutput: "11"}},
 		}, false},
 		{"mcq needs no testcases", CreateProblemRequest{
-			Name: "p", Description: "d", Score: 10, Type: "mcq", Answer: []int{1},
+			Name: "p", Description: "d", Score: 10, Type: "mcq",
+			Answer: []int{1}, Options: []string{"a", "b"},
 		}, false},
+		{"mcq needs an answer", CreateProblemRequest{
+			Name: "p", Description: "d", Score: 10, Type: "mcq", Options: []string{"a", "b"},
+		}, true},
+		{"mcq needs options", CreateProblemRequest{
+			Name: "p", Description: "d", Score: 10, Type: "mcq", Answer: []int{0},
+		}, true},
+		{"mcq needs at least two options", CreateProblemRequest{
+			Name: "p", Description: "d", Score: 10, Type: "mcq",
+			Answer: []int{0}, Options: []string{"only one"},
+		}, true},
 	}
 
 	for _, tc := range cases {

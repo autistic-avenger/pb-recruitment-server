@@ -28,8 +28,8 @@ func (s *ProblemStore) CreateProblem(ctx context.Context, p *models.Problem) err
 	}
 
 	const q = `
-        INSERT INTO problems (id, contest_id, name, score, type, answer, description, has_multiple_answers, testcases)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO problems (id, contest_id, name, score, type, answer, options, description, has_multiple_answers, testcases)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
     `
 	_, err := s.db.ExecContext(ctx, q,
 		p.ID,
@@ -38,6 +38,7 @@ func (s *ProblemStore) CreateProblem(ctx context.Context, p *models.Problem) err
 		p.Score,
 		p.Type,
 		pq.Array(p.Answer),
+		pq.Array(p.Options),
 		p.Description,
 		p.HasMultipleAnswers,
 		p.Testcases,
@@ -62,9 +63,10 @@ func (s *ProblemStore) UpdateProblem(ctx context.Context, p *models.Problem) err
             score = $4,
             type = $5,
 			answer = $6,
-			has_multiple_answers = $7,
-			description = $8,
-			testcases = $9
+			options = $7,
+			has_multiple_answers = $8,
+			description = $9,
+			testcases = $10
         WHERE id = $1 AND contest_id = $2
     `
 
@@ -75,6 +77,7 @@ func (s *ProblemStore) UpdateProblem(ctx context.Context, p *models.Problem) err
 		p.Score,
 		p.Type,
 		pq.Array(p.Answer),
+		pq.Array(p.Options),
 		p.HasMultipleAnswers,
 		p.Description,
 		p.Testcases,
@@ -119,7 +122,7 @@ func (s *ProblemStore) GetProblemList(ctx context.Context, contestID string) ([]
 	}
 	defer rows.Close()
 
-	var problems []dto.ProblemOverview
+	problems := make([]dto.ProblemOverview, 0)
 	for rows.Next() {
 		var p dto.ProblemOverview
 
@@ -136,25 +139,25 @@ func (s *ProblemStore) GetProblemList(ctx context.Context, contestID string) ([]
 		return nil, fmt.Errorf("rows error: %w", err)
 	}
 
-	if len(problems) == 0 {
-		log.Printf("Failed to find contest problems for contest %s", contestID)
-		return nil, common.ContestNotFoundError
-	}
-
 	return problems, nil
 }
 
 func (s *ProblemStore) GetProblem(ctx context.Context, problemID string, contestID string) (*dto.GetProblemStatementResponse, error) {
 	const q = `
-		SELECT id, contest_id, name, COALESCE(description,''), score, type, COALESCE(testcases,'')
+		SELECT id, contest_id, name, COALESCE(description,''), score, type,
+		       COALESCE(answer, '{}'::integer[]), COALESCE(options, '{}'::text[]),
+		       COALESCE(testcases,'')
 		FROM problems
 		WHERE id = $1 AND contest_id = $2
 	`
 
 	var p dto.GetProblemStatementResponse
+	var answers pq.Int64Array
+	var options pq.StringArray
 
 	err := s.db.QueryRowContext(ctx, q, problemID, contestID).Scan(
-		&p.ProblemID, &p.ContestID, &p.Name, &p.Description, &p.Score, &p.Type, &p.TestcasesKey,
+		&p.ProblemID, &p.ContestID, &p.Name, &p.Description, &p.Score, &p.Type,
+		&answers, &options, &p.TestcasesKey,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -164,6 +167,12 @@ func (s *ProblemStore) GetProblem(ctx context.Context, problemID string, contest
 		log.Printf("problem-store: query failed: %v", err)
 		return nil, fmt.Errorf("query problem: %w", err)
 	}
+
+	p.Answer = make([]int, len(answers))
+	for i, answer := range answers {
+		p.Answer[i] = int(answer)
+	}
+	p.Options = []string(options)
 
 	return &p, nil
 }

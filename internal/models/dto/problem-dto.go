@@ -16,6 +16,8 @@ type GetProblemStatementResponse struct {
 	Description  string                `json:"description"`
 	Score        int                   `json:"score"`
 	Type         models.SubmissionType `json:"type"`
+	Answer       []int                 `json:"answer,omitempty"`
+	Options      []string              `json:"options,omitempty"`
 	Testcases    []TestCaseResponse    `json:"testcases,omitempty"`
 	TestcasesKey string                `json:"-"`
 }
@@ -25,7 +27,8 @@ type CreateProblemRequest struct {
 	Description string                  `json:"description" validate:"required"`
 	Score       int                     `json:"score" validate:"required,gt=0"`
 	Type        models.SubmissionType   `json:"type" validate:"required,oneof=mcq code"`
-	Answer      []int                   `json:"answer"` // required only for MCQ
+	Answer      []int                   `json:"answer,omitempty" validate:"required_if=Type mcq,omitempty,dive,gte=0"`
+	Options     []string                `json:"options,omitempty" validate:"required_if=Type mcq,omitempty,min=2,dive,required"`
 	Testcases   []CreateTestCaseRequest `json:"testcases,omitempty" validate:"required_if=Type code,dive"`
 }
 

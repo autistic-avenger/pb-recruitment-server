@@ -38,6 +38,11 @@ func NewEchoServer(
 			echo.HeaderAccept,
 			echo.HeaderAuthorization,
 		},
+		ExposeHeaders: []string{
+			"X-Total-Count",
+			"X-Total-Pages",
+			"X-Current-Page",
+		},
 		AllowCredentials: true,
 	}))
 

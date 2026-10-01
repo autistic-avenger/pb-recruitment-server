@@ -102,6 +102,7 @@ func (cs *ContestService) CreateProblem(ctx context.Context, contestID string, r
 		Score:              req.Score,
 		Type:               req.Type,
 		Answer:             req.Answer,
+		Options:            req.Options,
 		HasMultipleAnswers: req.Type == "mcq" && len(req.Answer) > 1,
 	}
 
@@ -225,6 +226,7 @@ func (cs *ContestService) UpdateProblem(ctx context.Context, contestID string, p
 		Score:              req.Score,
 		Type:               req.Type,
 		Answer:             req.Answer,
+		Options:            req.Options,
 		HasMultipleAnswers: hasMultiple,
 		Testcases:          testcasesKey,
 	}
@@ -267,6 +269,10 @@ func (cs *ContestService) UpdateLeaderboardUser(ctx context.Context, contestID s
 	return cs.stores.Rankings.UpdateLeaderboardUser(ctx, contestID, userID, req)
 }
 
+func (cs *ContestService) GetLeaderboard(ctx context.Context, contestID string, page int) (*dto.GetLeaderboardResponse, error) {
+	return cs.stores.Rankings.GetLeaderboard(ctx, contestID, page)
+}
+
 func (cs *ContestService) GetProblemVisibility(ctx context.Context, contestID string, userID string) error {
 
 	contest, err := cs.GetContest(ctx, contestID, userID)
@@ -293,7 +299,7 @@ func (cs *ContestService) GetContestProblemsListAdmin(ctx context.Context, conte
 	return cs.stores.Problems.GetProblemList(ctx, contestID)
 }
 
-func (cs *ContestService) GetContestProblem(ctx context.Context, contestID string, problemID string, includeTestcases bool) (*dto.GetProblemStatementResponse, error) {
+func (cs *ContestService) GetContestProblem(ctx context.Context, contestID string, problemID string, includeAdminFields bool) (*dto.GetProblemStatementResponse, error) {
 
 	meta, err := cs.stores.Problems.GetProblem(ctx, problemID, contestID)
 	if err != nil {
@@ -332,6 +338,9 @@ func (cs *ContestService) GetContestProblem(ctx context.Context, contestID strin
 				}
 			}
 		}
+	}
+	if !includeAdminFields {
+		meta.Answer = nil
 	}
 
 	return meta, nil
