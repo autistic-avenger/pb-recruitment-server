@@ -468,7 +468,6 @@ func (cc *ContestController) GetProblemAnswers(ctx echo.Context) error {
 	return ctx.JSON(http.StatusOK, answers)
 }
 
-
 func (cc *ContestController) GetLeaderboard(ctx echo.Context) error {
 	contestID := ctx.Param("id")
 

@@ -77,7 +77,7 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 		  AND r.disqualified = false
 	`
 	var totalCount int
-	err := s.db.QueryRowContext(ctx, countQ, contestID).Scan(&totalCount) 
+	err := s.db.QueryRowContext(ctx, countQ, contestID).Scan(&totalCount)
 	if err != nil {
 		log.Printf("ranking-store: count query failed: %v", err)
 		return nil, fmt.Errorf("count rankings: %w", err)
@@ -151,7 +151,7 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 				}
 			}
 			entries[i].ProblemsSolved = solved
-			entries[i].LastSubmissionTime = lastSub*1000 //convert s-> ms
+			entries[i].LastSubmissionTime = lastSub * 1000 //convert s-> ms
 		}
 	}
 

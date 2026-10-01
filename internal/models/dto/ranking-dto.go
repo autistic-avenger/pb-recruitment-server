@@ -5,7 +5,6 @@ type UpdateLeaderboardUserRequest struct {
 	Disqualified *bool `json:"disqualified"`
 }
 
-
 type LeaderboardEntry struct {
 	Rank               int            `json:"rank"`
 	UserID             string         `json:"user_id"`
@@ -17,7 +16,6 @@ type LeaderboardEntry struct {
 	ProblemScores      []ProblemScore `json:"problem_scores,omitempty"`
 }
 
-
 type ProblemScore struct {
 	ProblemID   string `json:"problem_id"`
 	ProblemName string `json:"problem_name"`
@@ -26,7 +24,6 @@ type ProblemScore struct {
 	Attempts    int    `json:"attempts"`
 	SolvedAt    *int64 `json:"solved_at,omitempty"`
 }
-
 
 type GetLeaderboardResponse struct {
 	Entries    []LeaderboardEntry `json:"entries"`
