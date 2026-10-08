@@ -32,6 +32,12 @@ type Storage struct {
 		GetTestCaseResultsBySubmissionID(context.Context, string) ([]models.TestCaseResult, error)
 		ListUserSubmissionsByProblemID(context.Context, string, string, int) ([]models.Submission, error)
 		CreateSubmission(context.Context, *models.Submission) (string, error)
+		MarkFailed(context.Context, string) error
+	}
+	Executions interface {
+		InsertBatch(ctx context.Context, submissionID string, indexes []int) ([]models.Execution, error)
+		SaveTokens(ctx context.Context, tokens map[string]string) error
+		MarkFailed(ctx context.Context, ids []string) error
 	}
 	Rankings interface {
 		UpdateLeaderboardUser(ctx context.Context, contestID string, userID string, req *dto.UpdateLeaderboardUserRequest) error
@@ -54,6 +60,7 @@ func NewStorage(db *sql.DB) *Storage {
 		Contests:    NewContestStore(db),
 		Users:       NewUserStore(db),
 		Submissions: NewSubmissionStore(db),
+		Executions:  NewExecutionStore(db),
 		Rankings:    NewRankingStore(db),
 		Problems:    NewProblemStore(db),
 		Admins:      NewAdminStore(db),

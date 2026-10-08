@@ -255,3 +255,18 @@ func (s *SubmissionStore) CreateSubmission(ctx context.Context, sub *models.Subm
 
 	return submissionID, nil
 }
+
+func (s *SubmissionStore) MarkFailed(ctx context.Context, submissionID string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("submission store: db is not initialized")
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE submissions SET status = 'judge_error'
+		WHERE id = $1 AND status = 'pending'
+	`, submissionID)
+	if err != nil {
+		return fmt.Errorf("mark submission failed: %w", err)
+	}
+	return nil
+}

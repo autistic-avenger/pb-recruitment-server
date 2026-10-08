@@ -5,8 +5,8 @@ import "app/internal/models"
 type SubmitSubmissionRequest struct {
 	ContestID string         		`json:"contest_id" validate:"required"`
 	ProblemID string         		`json:"problem_id" validate:"required"`
-	Language  string         		`json:"language"`
-	Code      string         		`json:"code"`   // Base64 encoded code
+	Language string `json:"language" validate:"required_if=Type code"`
+	Code     string `json:"code" validate:"required_if=Type code"`
 	Option    []int          		`json:"option"` // For MCQ type questions
 	Type      models.SubmissionType `json:"type" validate:"required"`
 }

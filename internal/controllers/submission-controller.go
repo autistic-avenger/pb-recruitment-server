@@ -4,9 +4,11 @@ import (
 	"app/internal/common"
 	"app/internal/models/dto"
 	"app/internal/services"
+	"context"
 	"errors"
 	"github.com/labstack/echo/v4"
 	"net/http"
+	"time"
 )
 
 type SubmissionController struct {
@@ -89,7 +91,8 @@ func(sc *SubmissionController) ListUserSubmissions(ctx echo.Context) error {
 }	
 
 func (sc *SubmissionController) SubmitSolution(ctx echo.Context) error {
-	reqCtx := ctx.Request().Context()
+	reqCtx, cancelPreparation := context.WithTimeout(ctx.Request().Context(), 5*time.Second)
+	defer cancelPreparation()
 	userID := ctx.Get(common.AUTH_USER_ID).(string)
 
 	req, ok := ctx.Get(common.VALIDATED_REQUEST_BODY).(*dto.SubmitSubmissionRequest)
@@ -118,6 +121,9 @@ func (sc *SubmissionController) SubmitSolution(ctx echo.Context) error {
 		}
 		if errors.Is(err, common.KeyAlreadyExistsError) {
 			return ctx.JSON(http.StatusConflict, map[string]string{"error": err.Error()})
+		}
+		if errors.Is(err, common.ErrUnsupportedLanguage) || errors.Is(err, common.ErrNoTestcases) || errors.Is(err, common.ErrInvalidCode) {
+			return ctx.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
 		return ctx.NoContent(http.StatusInternalServerError)
 	}

@@ -5,6 +5,7 @@ go 1.25.1
 require (
 	github.com/aws/aws-sdk-go-v2 v1.39.6
 	github.com/jackc/pgx/v5 v5.7.6
+	github.com/matoous/go-nanoid/v2 v2.1.0
 )
 
 require (
@@ -29,7 +30,6 @@ require (
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
-	github.com/matoous/go-nanoid/v2 v2.1.0 // indirect
 )
 
 require (
@@ -51,7 +51,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.31.12
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.90.2
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.39.6
-	github.com/aws/smithy-go v1.23.2 // indirect
+	github.com/aws/smithy-go v1.23.2
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cncf/xds/go v0.0.0-20250501225837-2ac532fd4443 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.32.4 // indirect

@@ -20,6 +20,8 @@ type GetProblemStatementResponse struct {
 	Options      []string              `json:"options,omitempty"`
 	Testcases    []TestCaseResponse    `json:"testcases,omitempty"`
 	TestcasesKey string                `json:"-"`
+	TimeLimit   int `json:"time_limit,omitempty"`
+	MemoryLimit int `json:"memory_limit,omitempty"`
 }
 
 type CreateProblemRequest struct {
@@ -30,6 +32,8 @@ type CreateProblemRequest struct {
 	Answer      []int                   `json:"answer,omitempty" validate:"required_if=Type mcq,omitempty,dive,gte=0"`
 	Options     []string                `json:"options,omitempty" validate:"required_if=Type mcq,omitempty,min=2,dive,required"`
 	Testcases   []CreateTestCaseRequest `json:"testcases,omitempty" validate:"required_if=Type code,dive"`
+	TimeLimit   int `json:"time_limit,omitempty"`
+	MemoryLimit int `json:"memory_limit,omitempty"`
 }
 
 type CreateTestCaseRequest struct {

@@ -5,10 +5,11 @@ import (
 	"app/internal/boot"
 	"app/internal/controllers"
 	"app/internal/db"
+	"app/internal/judge0"
 	"app/internal/routes"
+	"app/internal/s3"
 	"app/internal/services"
 	"app/internal/stores"
-	"app/internal/s3"
 	"log"
 
 	"go.uber.org/fx"
@@ -22,33 +23,23 @@ func main() {
 	fx.New(
 		fx.Provide(
 			boot.NewFirebaseAuth,
-			// Controllers
 			controllers.NewContestController,
 			controllers.NewUserController,
 			controllers.NewSubmissionController,
-			// Services
 			services.NewContestService,
 			services.NewUserService,
 			services.NewSubmissionService,
 			services.NewAdminService,
-			// Server
 			internal.NewEchoServer,
-			// Stores
 			stores.NewStorage,
-			// Database
 			db.NewDBConn,
-			// S3
 			s3.NewS3Client,
+			judge0.NewClient,
 		),
-
-		// Add routes to the Echo server
 		fx.Invoke(routes.AddUserRoutes),
 		fx.Invoke(routes.AddContestRoutes),
 		fx.Invoke(routes.AddSubmissionRoutes),
-		// Admin routes
 		fx.Invoke(routes.AddAdminRoutes),
-
-		// Start the Echo server
 		fx.Invoke(internal.StartEchoServer),
 	).Run()
 }

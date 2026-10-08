@@ -22,4 +22,7 @@ var (
 	InvalidYearError               = errors.New("invalid year")
 	KeyNotFoundError               = errors.New("key not found")
 	KeyAlreadyExistsError          = errors.New("key already exists")
+	ErrUnsupportedLanguage = errors.New("unsupported language")
+	ErrNoTestcases         = errors.New("problem has no testcases")
+	ErrInvalidCode         = errors.New("code is required")
 )

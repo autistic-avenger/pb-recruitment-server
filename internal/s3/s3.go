@@ -26,13 +26,20 @@ func NewS3Client() *S3 {
 	if err != nil {
 		log.Fatal(err)
 	}
-	client := s3.NewFromConfig(cfg)
+
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		if endpoint := os.Getenv("AWS_ENDPOINT_URL_S3"); endpoint != "" {
+			o.BaseEndpoint = aws.String(endpoint)
+			o.UsePathStyle = true
+		}
+	})
 
 	return &S3{
 		client: client,
 		Bucket: os.Getenv("S3_SUBMISSIONS_BUCKET"),
 	}
 }
+
 
 func (s *S3) PutObject(context context.Context, key string, contents string) error {
 	_, err := s.client.PutObject(context, &s3.PutObjectInput{

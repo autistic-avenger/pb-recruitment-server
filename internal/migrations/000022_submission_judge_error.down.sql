@@ -1,0 +1,1 @@
+-- PostgreSQL cannot remove an enum value; keep it for existing submissions.
