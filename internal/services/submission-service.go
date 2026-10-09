@@ -248,6 +248,13 @@ func judgeRuntimeMillis(raw json.RawMessage) (int64, error) {
 }
 
 func (ss *SubmissionService) RecoverJudge0(ctx context.Context) {
+	staleIDs, err := ss.stores.Executions.StaleTokenlessExecutions(ctx, 300, 50)
+	if err == nil && len(staleIDs) > 0 {
+		if err := ss.stores.Executions.MarkFailed(ctx, staleIDs); err != nil {
+			log.Errorf("judge0 recovery cleanup stale tokenless failed: %v", err)
+		}
+	}
+
 	completed, err := ss.stores.Executions.TerminalPendingParents(ctx, 50)
 	if err != nil {
 		log.Errorf("judge0 recovery reconcile failed: %v", err)

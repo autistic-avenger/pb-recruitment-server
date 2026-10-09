@@ -42,6 +42,7 @@ type Storage struct {
 		PendingWithTokens(ctx context.Context, limit int, cursorTime int64, cursorID string) ([]struct{ ID, Token string }, int64, string, error)
 		BindToken(ctx context.Context, executionID, token string) error
 		TerminalPendingParents(ctx context.Context, limit int) ([]FinalExecutionResult, error)
+		StaleTokenlessExecutions(ctx context.Context, olderThanSeconds int64, limit int) ([]string, error)
 	}
 	Rankings interface {
 		UpdateLeaderboardUser(ctx context.Context, contestID string, userID string, req *dto.UpdateLeaderboardUserRequest) error

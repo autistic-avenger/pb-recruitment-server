@@ -430,3 +430,23 @@ func (s *ExecutionStore) TerminalPendingParents(ctx context.Context, limit int) 
 	}
 	return out, rows.Err()
 }
+
+func (s *ExecutionStore) StaleTokenlessExecutions(ctx context.Context, olderThanSeconds int64, limit int) ([]string, error) {
+	cutoff := time.Now().Unix() - olderThanSeconds
+	rows, err := s.db.QueryContext(ctx, `SELECT id::text FROM submission_executions WHERE status='pending' AND judge0_token IS NULL AND created_at <= $1 LIMIT $2`, cutoff, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
