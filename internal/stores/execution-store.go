@@ -193,15 +193,20 @@ func (s *ExecutionStore) MarkFailed(ctx context.Context, ids []string) error {
 		for _, c := range children {
 			for _, id := range ids {
 				if c.id == id && c.status == "pending" {
-					_, e = tx.ExecContext(ctx, `UPDATE submission_executions SET status='judge_error',runtime=0,memory=0 WHERE id=$1 AND status='pending'`, id)
+					res, e := tx.ExecContext(ctx, `UPDATE submission_executions SET status='judge_error',runtime=0,memory=0 WHERE id=$1 AND status='pending' AND judge0_token IS NULL`, id)
 					if e != nil {
 						tx.Rollback()
 						return e
 					}
-					_, e = tx.ExecContext(ctx, `INSERT INTO test_case_results(id,execution_id,submission_id,test_case_id,status,runtime,memory,created_at) VALUES($1,$1,$2,$3,'judge_error',0,0,$4) ON CONFLICT(execution_id) DO NOTHING`, id, parent, c.id, time.Now().Unix())
-					if e != nil {
-						tx.Rollback()
-						return e
+
+					rowsAffected, _ := res.RowsAffected()
+
+					if rowsAffected >0 {
+						_, e = tx.ExecContext(ctx, `INSERT INTO test_case_results(id,execution_id,submission_id,test_case_id,status,runtime,memory,created_at) VALUES($1,$1,$2,$3,'judge_error',0,0,$4) ON CONFLICT(execution_id) DO NOTHING`, id, parent, c.id, time.Now().Unix())
+						if e != nil {
+							tx.Rollback()
+							return e
+						}
 					}
 				}
 			}
