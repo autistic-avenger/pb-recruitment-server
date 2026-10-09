@@ -326,7 +326,16 @@ func (cs *ContestService) GetContestProblem(ctx context.Context, contestID strin
 		if err != nil {
 			return nil, err
 		}
-		meta.Description = desc
+		
+		var data struct {
+			Description string `json:"description"`
+		}
+
+		if err := json.Unmarshal([]byte(desc), &data); err != nil {
+			return nil, fmt.Errorf("unmarshal problem description: %w", err)
+		}
+
+		meta.Description = data.Description
 	}
 	if meta.Type == models.Code && meta.TestcasesKey != "" {
 		// ponytail: testcases are secondary data. A missing or corrupt object must not
