@@ -292,7 +292,12 @@ func (s *ExecutionStore) ProcessFinal(ctx context.Context, r FinalExecutionResul
 	if alreadyTerminal {
 		conflict = `ON CONFLICT(execution_id) DO NOTHING`
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO test_case_results(id,execution_id,submission_id,test_case_id,status,runtime,memory,created_at) VALUES($1,$1,$2,$3,$4,$5,$6,$7) `+conflict, r.ExecutionID, subID, fmt.Sprint(index), r.Status, r.Runtime, r.Memory, time.Now().Unix())
+
+	tcStatus := r.Status
+    if tcStatus == "accepted" {                                   
+        tcStatus = "pass"                                
+    } 
+	_, err = tx.ExecContext(ctx, `INSERT INTO test_case_results(id,execution_id,submission_id,test_case_id,status,runtime,memory,created_at) VALUES($1,$1,$2,$3,$4,$5,$6,$7) `+conflict, r.ExecutionID, subID, fmt.Sprint(index), tcStatus, r.Runtime, r.Memory, time.Now().Unix())
 	if err != nil {
 		return err
 	}
