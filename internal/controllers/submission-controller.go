@@ -3,15 +3,17 @@ package controllers
 import (
 	"app/internal/common"
 	"app/internal/judge0"
+	"app/internal/models"
 	"app/internal/models/dto"
 	"app/internal/services"
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
 	"net/http"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
 )
 
 type SubmissionController struct {
@@ -136,6 +138,11 @@ func (sc *SubmissionController) SubmitSolution(ctx echo.Context) error {
 	}
 	if !*contest_response.IsRegistered {
 		return ctx.NoContent(http.StatusForbidden)
+	}
+	if contest_response.GetRunningStatus() != models.ContestRunningOpen{
+		return ctx.JSON(http.StatusForbidden, map[string]string{
+			"error": "contest is not open for submissions",
+		})
 	}
 
 	submissionType := req.Type
