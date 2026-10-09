@@ -384,21 +384,30 @@ func aggregateFailure(children []executionChild, changedID, changedStatus string
 	return "judge_error"
 }
 
-func (s *ExecutionStore) PendingWithTokens(ctx context.Context, limit int) ([]struct{ ID, Token string }, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id::text,judge0_token FROM submission_executions WHERE status='pending' AND judge0_token IS NOT NULL AND created_at <= extract(epoch from now())::bigint - 30 ORDER BY created_at LIMIT $1`, limit)
+func (s *ExecutionStore) PendingWithTokens(ctx context.Context, limit int, cursorTime int64, cursorID string) ([]struct{ ID, Token string }, int64, string, error) {
+	query := `SELECT id::text, judge0_token, created_at FROM submission_executions
+              WHERE status='pending' AND judge0_token IS NOT NULL
+                AND created_at <= extract(epoch from now())::bigint - 30
+                AND (created_at, id) > ($2, $3)
+              ORDER BY created_at, id LIMIT $1`
+	rows, err := s.db.QueryContext(ctx, query, limit, cursorTime, cursorID)
 	if err != nil {
-		return nil, err
+		return nil, 0, "", err
 	}
 	defer rows.Close()
+
 	out := []struct{ ID, Token string }{}
+	var lastTime int64
+	var lastID string
 	for rows.Next() {
 		var x struct{ ID, Token string }
-		if err = rows.Scan(&x.ID, &x.Token); err != nil {
-			return nil, err
+		if err = rows.Scan(&x.ID, &x.Token, &lastTime); err != nil {
+			return nil, 0, "", err
 		}
+		lastID = x.ID
 		out = append(out, x)
 	}
-	return out, rows.Err()
+	return out, lastTime, lastID, rows.Err()
 }
 
 func (s *ExecutionStore) TerminalPendingParents(ctx context.Context, limit int) ([]FinalExecutionResult, error) {

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/labstack/gommon/log"
@@ -21,9 +22,12 @@ import (
 )
 
 type SubmissionService struct {
-	stores *stores.Storage
-	s3     *s3.S3
-	judge0 *judge0.Client
+	stores             *stores.Storage
+	s3                 *s3.S3
+	judge0             *judge0.Client
+	recoveryCursorTime int64
+	recoveryCursorID   string
+	cursorMu           sync.Mutex
 }
 
 func NewSubmissionService(stores *stores.Storage, s3 *s3.S3, judge0Client *judge0.Client) *SubmissionService {
@@ -249,17 +253,40 @@ func (ss *SubmissionService) RecoverJudge0(ctx context.Context) {
 		log.Errorf("judge0 recovery reconcile failed: %v", err)
 	} else {
 		for _, result := range completed {
+			if ctx.Err() != nil {
+				return
+			}
 			if e := ss.stores.Executions.ProcessFinal(ctx, result); e != nil {
 				log.Errorf("judge0 recovery reconcile result failed: %v", e)
 			}
 		}
 	}
-	items, err := ss.stores.Executions.PendingWithTokens(ctx, 50)
+
+	ss.cursorMu.Lock()
+	cTime, cID := ss.recoveryCursorTime, ss.recoveryCursorID
+	ss.cursorMu.Unlock()
+
+	items, nextTime, nextID, err := ss.stores.Executions.PendingWithTokens(ctx, 50, cTime, cID)
 	if err != nil {
 		log.Errorf("judge0 recovery list failed: %v", err)
 		return
 	}
+
+	ss.cursorMu.Lock()
+	if len(items) < 50 {
+		ss.recoveryCursorTime = 0
+		ss.recoveryCursorID = ""
+	} else {
+		ss.recoveryCursorTime = nextTime
+		ss.recoveryCursorID = nextID
+	}
+	ss.cursorMu.Unlock()
+
 	for _, item := range items {
+		if ctx.Err() != nil {
+			log.Warnf("judge0 recovery context timeout, breaking early")
+			break
+		}
 		callCtx, cancel := context.WithTimeout(ctx, ss.judge0.Timeout())
 		result, e := ss.judge0.GetSubmission(callCtx, item.Token)
 		cancel()

@@ -39,7 +39,7 @@ type Storage struct {
 		SaveTokens(ctx context.Context, tokens map[string]string) error
 		MarkFailed(ctx context.Context, ids []string) error
 		ProcessFinal(ctx context.Context, result FinalExecutionResult) error
-		PendingWithTokens(ctx context.Context, limit int) ([]struct{ ID, Token string }, error)
+		PendingWithTokens(ctx context.Context, limit int, cursorTime int64, cursorID string) ([]struct{ ID, Token string }, int64, string, error)
 		BindToken(ctx context.Context, executionID, token string) error
 		TerminalPendingParents(ctx context.Context, limit int) ([]FinalExecutionResult, error)
 	}
