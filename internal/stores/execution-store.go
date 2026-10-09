@@ -173,16 +173,20 @@ func (s *ExecutionStore) MarkFailed(ctx context.Context, ids []string) error {
 			tx.Rollback()
 			return e
 		}
-		execs, e := tx.QueryContext(ctx, `SELECT id,status FROM submission_executions WHERE submission_id=$1 ORDER BY id FOR UPDATE`, parent)
+		execs, e := tx.QueryContext(ctx, `SELECT id, status, test_case_index FROM submission_executions WHERE submission_id=$1 ORDER BY test_case_index FOR UPDATE`, parent)
 		if e != nil {
 			tx.Rollback()
 			return e
 		}
-		type child struct{ id, status string }
+		type child struct {
+			id            string
+			status        string
+			testCaseIndex int
+		}
 		var children []child
 		for execs.Next() {
 			var c child
-			if e = execs.Scan(&c.id, &c.status); e != nil {
+			if e = execs.Scan(&c.id, &c.status, &c.testCaseIndex); e != nil {
 				execs.Close()
 				tx.Rollback()
 				return e
@@ -201,8 +205,8 @@ func (s *ExecutionStore) MarkFailed(ctx context.Context, ids []string) error {
 
 					rowsAffected, _ := res.RowsAffected()
 
-					if rowsAffected >0 {
-						_, e = tx.ExecContext(ctx, `INSERT INTO test_case_results(id,execution_id,submission_id,test_case_id,status,runtime,memory,created_at) VALUES($1,$1,$2,$3,'judge_error',0,0,$4) ON CONFLICT(execution_id) DO NOTHING`, id, parent, c.id, time.Now().Unix())
+					if rowsAffected > 0 {
+						_, e = tx.ExecContext(ctx, `INSERT INTO test_case_results(id,execution_id,submission_id,test_case_id,status,runtime,memory,created_at) VALUES($1,$1,$2,$3,'judge_error',0,0,$4) ON CONFLICT(execution_id) DO NOTHING`, id, parent, fmt.Sprint(c.testCaseIndex), time.Now().Unix())
 						if e != nil {
 							tx.Rollback()
 							return e
