@@ -38,6 +38,10 @@ type Storage struct {
 		InsertBatch(ctx context.Context, submissionID string, indexes []int) ([]models.Execution, error)
 		SaveTokens(ctx context.Context, tokens map[string]string) error
 		MarkFailed(ctx context.Context, ids []string) error
+		ProcessFinal(ctx context.Context, result FinalExecutionResult) error
+		PendingWithTokens(ctx context.Context, limit int) ([]struct{ ID, Token string }, error)
+		BindToken(ctx context.Context, executionID, token string) error
+		TerminalPendingParents(ctx context.Context, limit int) ([]FinalExecutionResult, error)
 	}
 	Rankings interface {
 		UpdateLeaderboardUser(ctx context.Context, contestID string, userID string, req *dto.UpdateLeaderboardUserRequest) error

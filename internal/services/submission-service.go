@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/labstack/gommon/log"
+	"go.uber.org/fx"
+	"strconv"
 )
 
 type SubmissionService struct {
@@ -178,6 +180,120 @@ func (ss *SubmissionService) CreateSubmission(ctx context.Context, userID string
 
 	return submissionID, nil
 
+}
+
+func (ss *SubmissionService) HandleJudge0Callback(ctx context.Context, executionID string, payload judge0.CallbackResult) error {
+	status, final := mapJudgeStatus(payload.Status.ID)
+	if !final {
+		if payload.Token == "" {
+			return fmt.Errorf("missing Judge0 token")
+		}
+		return ss.stores.Executions.BindToken(ctx, executionID, payload.Token)
+	}
+	runtime, err := judgeRuntimeMillis(payload.Time)
+	if err != nil {
+		return err
+	}
+	memory := int64(0)
+	if payload.Memory != nil {
+		memory = *payload.Memory
+	}
+	return ss.stores.Executions.ProcessFinal(ctx, stores.FinalExecutionResult{ExecutionID: executionID, Token: payload.Token, Status: status, Runtime: runtime, Memory: memory})
+}
+
+func mapJudgeStatus(id int) (string, bool) {
+	switch {
+	case id <= 2:
+		return "pending", false
+	case id == 3:
+		return "accepted", true
+	case id == 4:
+		return "wrong_answer", true
+	case id == 5:
+		return "tle", true
+	case id == 6:
+		return "failed_to_process", true
+	case id >= 7 && id <= 12:
+		return "rte", true
+	case id == 13 || id == 14:
+		return "judge_error", true
+	default:
+		return "", false
+	}
+}
+func judgeRuntimeMillis(raw json.RawMessage) (int64, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, nil
+	}
+	var s string
+	if raw[0] == '"' {
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return 0, err
+		}
+	} else {
+		s = string(raw)
+	}
+	seconds, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, err
+	}
+	if seconds < 0 {
+		return 0, fmt.Errorf("negative Judge0 runtime")
+	}
+	return int64(seconds*1000 + 0.5), nil
+}
+
+func (ss *SubmissionService) RecoverJudge0(ctx context.Context) {
+	completed, err := ss.stores.Executions.TerminalPendingParents(ctx, 50)
+	if err != nil {
+		log.Errorf("judge0 recovery reconcile failed: %v", err)
+	} else {
+		for _, result := range completed {
+			if e := ss.stores.Executions.ProcessFinal(ctx, result); e != nil {
+				log.Errorf("judge0 recovery reconcile result failed: %v", e)
+			}
+		}
+	}
+	items, err := ss.stores.Executions.PendingWithTokens(ctx, 50)
+	if err != nil {
+		log.Errorf("judge0 recovery list failed: %v", err)
+		return
+	}
+	for _, item := range items {
+		callCtx, cancel := context.WithTimeout(ctx, ss.judge0.Timeout())
+		result, e := ss.judge0.GetSubmission(callCtx, item.Token)
+		cancel()
+		if e != nil || result == nil {
+			continue
+		}
+		_, final := mapJudgeStatus(result.Status.ID)
+		if !final {
+			continue
+		}
+		payload := judge0.CallbackResult{Token: result.Token, Time: result.Time, Memory: result.Memory}
+		payload.Status.ID = result.Status.ID
+		if payload.Token == "" {
+			payload.Token = item.Token
+		}
+		if e = ss.HandleJudge0Callback(ctx, item.ID, payload); e != nil {
+			log.Errorf("judge0 recovery result failed: %v", e)
+		}
+	}
+}
+
+func NewJudge0Recovery(lc fx.Lifecycle, ss *SubmissionService) {
+	lc.Append(fx.Hook{OnStart: func(context.Context) error {
+		go func() {
+			ticker := time.NewTicker(15 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				ss.RecoverJudge0(ctx)
+				cancel()
+			}
+		}()
+		return nil
+	}})
 }
 
 func (ss *SubmissionService) markSubmissionFailed(ctx context.Context, submissionID string, cause error) error {

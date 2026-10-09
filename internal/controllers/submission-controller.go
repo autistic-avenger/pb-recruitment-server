@@ -2,10 +2,13 @@ package controllers
 
 import (
 	"app/internal/common"
+	"app/internal/judge0"
 	"app/internal/models/dto"
 	"app/internal/services"
 	"context"
+	"encoding/json"
 	"errors"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"net/http"
 	"time"
@@ -14,24 +17,47 @@ import (
 type SubmissionController struct {
 	submissionService *services.SubmissionService
 	contestService    *services.ContestService
+	judge0Client      *judge0.Client
 }
 
-func NewSubmissionController(submissionService *services.SubmissionService, contestService *services.ContestService) *SubmissionController {
+func NewSubmissionController(submissionService *services.SubmissionService, contestService *services.ContestService, judge0Client *judge0.Client) *SubmissionController {
 	return &SubmissionController{
 		submissionService: submissionService,
 		contestService:    contestService,
+		judge0Client:      judge0Client,
 	}
 }
 
-func(sc *SubmissionController) GetSubmissionStatus(ctx echo.Context) error {
+func (sc *SubmissionController) Judge0Callback(c echo.Context) error {
+	id := c.Param("execution_id")
+	if _, err := uuid.Parse(id); err != nil {
+		return c.NoContent(http.StatusBadRequest)
+	}
+	if sc.judge0Client == nil || !sc.judge0Client.CallbacksEnabled() || !sc.judge0Client.VerifyCallback(id, c.QueryParam("sig")) {
+		return c.NoContent(http.StatusUnauthorized)
+	}
+	var payload judge0.CallbackResult
+	if err := json.NewDecoder(c.Request().Body).Decode(&payload); err != nil {
+		return c.NoContent(http.StatusBadRequest)
+	}
+	if payload.Token == "" || payload.Status.ID < 1 || payload.Status.ID > 14 {
+		return c.NoContent(http.StatusBadRequest)
+	}
+	if err := sc.submissionService.HandleJudge0Callback(c.Request().Context(), id, payload); err != nil {
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	return c.NoContent(http.StatusOK)
+}
+
+func (sc *SubmissionController) GetSubmissionStatus(ctx echo.Context) error {
 	id := ctx.Param("id")
 	userID := ctx.Get(common.AUTH_USER_ID).(string)
 
 	sub, err := sc.submissionService.GetSubmissionStatusByID(ctx.Request().Context(), id)
 	if err != nil {
 		if errors.Is(err, common.ErrNotFound) {
-            return ctx.NoContent(http.StatusNotFound)
-        }
+			return ctx.NoContent(http.StatusNotFound)
+		}
 
 		return ctx.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "failed to get submission status",
@@ -68,7 +94,7 @@ func (sc *SubmissionController) GetSubmissionDetails(ctx echo.Context) error {
 	return ctx.JSON(http.StatusOK, sub)
 }
 
-func(sc *SubmissionController) ListUserSubmissions(ctx echo.Context) error {
+func (sc *SubmissionController) ListUserSubmissions(ctx echo.Context) error {
 	userID := ctx.Get(common.AUTH_USER_ID).(string)
 
 	req, ok := ctx.Get(common.VALIDATED_REQUEST_BODY).(*dto.ListProblemSubmissionsRequest)
@@ -88,7 +114,7 @@ func(sc *SubmissionController) ListUserSubmissions(ctx echo.Context) error {
 	return ctx.JSON(http.StatusOK, dto.ListProblemSubmissionsResponse{
 		Submissions: submissions,
 	})
-}	
+}
 
 func (sc *SubmissionController) SubmitSolution(ctx echo.Context) error {
 	reqCtx, cancelPreparation := context.WithTimeout(ctx.Request().Context(), 5*time.Second)

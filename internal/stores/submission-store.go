@@ -123,7 +123,7 @@ func (s *SubmissionStore) GetTestCaseResultsBySubmissionID(ctx context.Context, 
 		SELECT id, submission_id, test_case_id, status, runtime, memory, created_at
 		FROM test_case_results
 		WHERE submission_id = $1
-		ORDER BY created_at ASC
+		ORDER BY CASE WHEN test_case_id ~ '^[0-9]+$' THEN test_case_id::bigint ELSE 9223372036854775807 END ASC, created_at ASC, id ASC
 	`
 	rows, err := s.db.QueryContext(ctx, q, submissionID)
 	if err != nil {
