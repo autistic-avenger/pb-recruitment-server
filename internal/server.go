@@ -16,7 +16,7 @@ func NewEchoServer(
 ) *echo.Echo {
 	e := echo.New()
 	e.Use(mdw.Recover())
-	e.Use(mdw.LoggerWithConfig(mdw.LoggerConfig{Format: "${time_rfc3339} ${method} ${path} ${status} ${latency_human}\\n"}))
+	e.Use(mdw.LoggerWithConfig(mdw.LoggerConfig{Format: "${time_rfc3339} ${method} ${path} ${status} ${latency_human}\n"}))
 	e.Use(mdw.CORSWithConfig(mdw.CORSConfig{
 		AllowOrigins: []string{
 			"https://recruitment.pointblank.club",
