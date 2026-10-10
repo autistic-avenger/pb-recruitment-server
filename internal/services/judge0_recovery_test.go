@@ -28,6 +28,9 @@ func (*recoveryTestStore) StaleTokenlessExecutions(context.Context, int64, int) 
 func (*recoveryTestStore) TerminalPendingParents(context.Context, int) ([]stores.FinalExecutionResult, error) {
 	return nil, nil
 }
+func (*recoveryTestStore) ProcessFinal(context.Context, stores.FinalExecutionResult) error {
+	return nil
+}
 func (s *recoveryTestStore) PendingWithTokens(_ context.Context, limit int, created int64, id string) ([]models.Execution, error) {
 	var out []models.Execution
 	for _, item := range s.items {

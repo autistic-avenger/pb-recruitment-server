@@ -8,13 +8,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/google/uuid"
 	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/labstack/gommon/log"
 )
+
+var ErrDispatchRejected = fmt.Errorf("Judge0 explicitly rejected dispatch")
 
 type Client struct {
 	baseURL        string
@@ -28,6 +32,10 @@ type Client struct {
 const maxDispatchTimeout = 10 * time.Second
 
 func NewClient() *Client {
+	callbackBase, callbackSecret := os.Getenv("JUDGE0_CALLBACK_BASE_URL"), os.Getenv("JUDGE0_CALLBACK_SECRET")
+	if (callbackBase == "") != (callbackSecret == "") {
+		log.Errorf("Judge0 callbacks are misconfigured: JUDGE0_CALLBACK_BASE_URL and JUDGE0_CALLBACK_SECRET must be set together")
+	}
 	timeout := maxDispatchTimeout
 	if raw := os.Getenv("JUDGE0_TIMEOUT_MS"); raw != "" {
 		if ms, err := time.ParseDuration(raw + "ms"); err == nil && ms > 0 {
@@ -38,8 +46,8 @@ func NewClient() *Client {
 	return &Client{
 		baseURL:        os.Getenv("JUDGE0_URL"),
 		authToken:      os.Getenv("JUDGE0_AUTH_TOKEN"),
-		callbackBase:   os.Getenv("JUDGE0_CALLBACK_BASE_URL"),
-		callbackSecret: os.Getenv("JUDGE0_CALLBACK_SECRET"),
+		callbackBase:   callbackBase,
+		callbackSecret: callbackSecret,
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
@@ -145,6 +153,9 @@ func (c *Client) GetSubmission(ctx context.Context, token string) (*SubmissionSt
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, ErrSubmissionNotFound
+		}
 		return nil, fmt.Errorf("%w: status %d", ErrUnavailable, resp.StatusCode)
 	}
 	var out SubmissionStatusResponse
@@ -183,7 +194,7 @@ func (c *Client) postBatch(ctx context.Context, jobs []SubmissionRequest) ([]Sub
 	}
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: status %d: %s", ErrUnavailable, resp.StatusCode, string(body))
+		return nil, fmt.Errorf("%w: status %d: %s", ErrDispatchRejected, resp.StatusCode, string(body))
 	}
 
 	var tokens []batchTokenResponse

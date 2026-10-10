@@ -179,10 +179,24 @@ func (ss *SubmissionService) CreateSubmission(ctx context.Context, userID string
 	if len(tokens) > 0 {
 		if saveErr := ss.stores.Executions.SaveTokens(dbCtx, tokens); saveErr != nil {
 			log.Errorf("save judge0 tokens for submission %s: %v", submissionID, saveErr)
-			for id := range tokens {
-				failedIDs = append(failedIDs, id)
+			if !ss.judge0.CallbacksEnabled() {
+				for id := range tokens {
+					failedIDs = append(failedIDs, id)
+				}
 			}
 		}
+	}
+
+	if ss.judge0.CallbacksEnabled() {
+		refusedIDs := make([]string, 0)
+		for i, exec := range executions {
+			if i < len(results) && results[i].Error != nil {
+				if errors.Is(results[i].Error, judge0.ErrDispatchRejected) || errors.Is(results[i].Error, judge0.ErrInvalidResponse) {
+					refusedIDs = append(refusedIDs, exec.ID)
+				}
+			}
+		}
+		failedIDs = refusedIDs
 	}
 
 	if len(failedIDs) > 0 {
@@ -265,11 +279,24 @@ func (ss *SubmissionService) RecoverJudge0(ctx context.Context) {
 	}
 	defer ss.cursorMu.Unlock()
 
+	if ss.stores.Submissions != nil {
+		orphans, orphanErr := ss.stores.Submissions.PendingCodeWithoutExecutions(ctx, time.Now().Unix()-10, 50)
+		if orphanErr != nil {
+			log.Errorf("judge0 recovery list unprepared submissions failed: %v", orphanErr)
+		} else {
+			for _, id := range orphans {
+				if err := ss.stores.Submissions.MarkFailed(ctx, id); err != nil {
+					log.Errorf("judge0 recovery fail unprepared submission %s: %v", id, err)
+				}
+			}
+		}
+	}
+
 	// Allow late callbacks after the bounded dispatch path before failing orphaned jobs.
 	staleIDs, err := ss.stores.Executions.StaleTokenlessExecutions(ctx, 300, 50)
 	if err != nil {
 		log.Errorf("judge0 recovery list stale tokenless failed: %v", err)
-	} else if len(staleIDs) > 0 {
+	} else if len(staleIDs) > 0 && !ss.judge0.CallbacksEnabled() {
 		if err := ss.stores.Executions.MarkFailed(ctx, staleIDs); err != nil {
 			log.Errorf("judge0 recovery cleanup stale tokenless failed: %v", err)
 		}
@@ -311,6 +338,12 @@ func (ss *SubmissionService) RecoverJudge0(ctx context.Context) {
 		cancel()
 		// Advance only past attempted jobs so a timeout cannot skip the rest of the page.
 		ss.recoveryCursorTime, ss.recoveryCursorID = item.CreatedAt, item.ID
+		if errors.Is(e, judge0.ErrSubmissionNotFound) {
+			if e = ss.stores.Executions.ProcessFinal(ctx, stores.FinalExecutionResult{ExecutionID: item.ID, Token: item.Judge0Token, Status: "judge_error"}); e != nil {
+				log.Errorf("judge0 recovery missing token finalization failed: %v", e)
+			}
+			continue
+		}
 		if e != nil || result == nil {
 			continue
 		}

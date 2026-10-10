@@ -414,3 +414,20 @@ func (s *SubmissionStore) MarkFailed(ctx context.Context, submissionID string) e
 	}
 	return nil
 }
+
+func (s *SubmissionStore) PendingCodeWithoutExecutions(ctx context.Context, cutoff int64, limit int) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT s.id::text FROM submissions s WHERE s.type='code' AND s.status='pending' AND s.created_at <= $1 AND NOT EXISTS (SELECT 1 FROM submission_executions e WHERE e.submission_id=s.id) ORDER BY s.created_at,s.id LIMIT $2`, cutoff, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
