@@ -110,6 +110,10 @@ func (s *ExecutionStore) SaveTokens(ctx context.Context, tokens map[string]strin
 		}
 		parents = append(parents, id)
 	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	rows.Close()
 	for _, parent := range parents {
 		var locked string
@@ -161,6 +165,10 @@ func (s *ExecutionStore) MarkFailed(ctx context.Context, ids []string) error {
 		}
 		parents = append(parents, p)
 	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	rows.Close()
 	for _, parent := range parents {
 		tx, e := s.db.BeginTx(ctx, nil)
@@ -193,6 +201,11 @@ func (s *ExecutionStore) MarkFailed(ctx context.Context, ids []string) error {
 			}
 			children = append(children, c)
 		}
+		if e = execs.Err(); e != nil {
+			execs.Close()
+			tx.Rollback()
+			return e
+		}
 		execs.Close()
 		for _, c := range children {
 			for _, id := range ids {
@@ -203,7 +216,11 @@ func (s *ExecutionStore) MarkFailed(ctx context.Context, ids []string) error {
 						return e
 					}
 
-					rowsAffected, _ := res.RowsAffected()
+					rowsAffected, e := res.RowsAffected()
+					if e != nil {
+						tx.Rollback()
+						return e
+					}
 
 					if rowsAffected > 0 {
 						_, e = tx.ExecContext(ctx, `INSERT INTO test_case_results(id,execution_id,submission_id,test_case_id,status,runtime,memory,created_at) VALUES($1,$1,$2,$3,'judge_error',0,0,$4) ON CONFLICT(execution_id) DO NOTHING`, id, parent, fmt.Sprint(c.testCaseIndex), time.Now().Unix())
@@ -245,7 +262,6 @@ func (s *ExecutionStore) MarkFailed(ctx context.Context, ids []string) error {
 	return nil
 }
 
-
 func (s *ExecutionStore) ProcessFinal(ctx context.Context, r FinalExecutionResult) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -269,10 +285,15 @@ func (s *ExecutionStore) ProcessFinal(ctx context.Context, r FinalExecutionResul
 		}
 		children = append(children, c)
 	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	rows.Close()
 	var currentStatus, currentToken string
 	var index int
-	if err = tx.QueryRowContext(ctx, `SELECT status,COALESCE(judge0_token,''),test_case_index FROM submission_executions WHERE id=$1`, r.ExecutionID).Scan(&currentStatus, &currentToken, &index); err != nil {
+	var storedRuntime, storedMemory int64
+	if err = tx.QueryRowContext(ctx, `SELECT status,COALESCE(judge0_token,''),test_case_index,COALESCE(runtime,0),COALESCE(memory,0) FROM submission_executions WHERE id=$1`, r.ExecutionID).Scan(&currentStatus, &currentToken, &index, &storedRuntime, &storedMemory); err != nil {
 		return err
 	}
 	if currentToken != "" && r.Token != "" && currentToken != r.Token {
@@ -284,6 +305,7 @@ func (s *ExecutionStore) ProcessFinal(ctx context.Context, r FinalExecutionResul
 	}
 	if alreadyTerminal {
 		r.Status = currentStatus
+		r.Runtime, r.Memory = storedRuntime, storedMemory
 	}
 	if !alreadyTerminal && r.Token != "" {
 		_, err = tx.ExecContext(ctx, `UPDATE submission_executions SET judge0_token=$2 WHERE id=$1 AND (judge0_token IS NULL OR judge0_token=$2)`, r.ExecutionID, r.Token)
@@ -303,9 +325,9 @@ func (s *ExecutionStore) ProcessFinal(ctx context.Context, r FinalExecutionResul
 	}
 
 	tcStatus := r.Status
-    if tcStatus == "accepted" {                                   
-        tcStatus = "pass"                                
-    } 
+	if tcStatus == "accepted" {
+		tcStatus = "pass"
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO test_case_results(id,execution_id,submission_id,test_case_id,status,runtime,memory,created_at) VALUES($1,$1,$2,$3,$4,$5,$6,$7) `+conflict, r.ExecutionID, subID, fmt.Sprint(index), tcStatus, r.Runtime, r.Memory, time.Now().Unix())
 	if err != nil {
 		return err
@@ -317,6 +339,16 @@ func (s *ExecutionStore) ProcessFinal(ctx context.Context, r FinalExecutionResul
 		return err
 	}
 	if !pending {
+		// Reconciliation must restore every missing result before completing the parent.
+		_, err = tx.ExecContext(ctx, `INSERT INTO test_case_results(id,execution_id,submission_id,test_case_id,status,runtime,memory,created_at)
+			SELECT id,id,submission_id,test_case_index::text,
+			(CASE WHEN status='accepted' THEN 'pass' ELSE status END)::test_case_status,
+			COALESCE(runtime,0),COALESCE(memory,0),$2
+			FROM submission_executions WHERE submission_id=$1 AND status<>'pending'
+			ON CONFLICT(execution_id) DO NOTHING`, subID, time.Now().Unix())
+		if err != nil {
+			return err
+		}
 		verdict := aggregateFailure(children, r.ExecutionID, r.Status)
 		if accepted {
 			verdict = "accepted"
@@ -388,7 +420,10 @@ func aggregateFailure(children []executionChild, changedID, changedStatus string
 	return "judge_error"
 }
 
-func (s *ExecutionStore) PendingWithTokens(ctx context.Context, limit int, cursorTime int64, cursorID string) ([]struct{ ID, Token string }, int64, string, error) {
+func (s *ExecutionStore) PendingWithTokens(ctx context.Context, limit int, cursorTime int64, cursorID string) ([]models.Execution, error) {
+	if cursorID == "" {
+		cursorID = uuid.Nil.String()
+	}
 	query := `SELECT id::text, judge0_token, created_at FROM submission_executions
               WHERE status='pending' AND judge0_token IS NOT NULL
                 AND created_at <= extract(epoch from now())::bigint - 30
@@ -396,26 +431,27 @@ func (s *ExecutionStore) PendingWithTokens(ctx context.Context, limit int, curso
               ORDER BY created_at, id LIMIT $1`
 	rows, err := s.db.QueryContext(ctx, query, limit, cursorTime, cursorID)
 	if err != nil {
-		return nil, 0, "", err
+		return nil, err
 	}
 	defer rows.Close()
 
-	out := []struct{ ID, Token string }{}
-	var lastTime int64
-	var lastID string
+	out := []models.Execution{}
 	for rows.Next() {
-		var x struct{ ID, Token string }
-		if err = rows.Scan(&x.ID, &x.Token, &lastTime); err != nil {
-			return nil, 0, "", err
+		var x models.Execution
+		if err = rows.Scan(&x.ID, &x.Judge0Token, &x.CreatedAt); err != nil {
+			return nil, err
 		}
-		lastID = x.ID
 		out = append(out, x)
 	}
-	return out, lastTime, lastID, rows.Err()
+	return out, rows.Err()
 }
 
 func (s *ExecutionStore) TerminalPendingParents(ctx context.Context, limit int) ([]FinalExecutionResult, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT e.id::text,e.status,COALESCE(e.runtime,0),COALESCE(e.memory,0) FROM submission_executions e JOIN submissions s ON s.id=e.submission_id WHERE s.status='pending' AND e.status<>'pending' ORDER BY e.created_at LIMIT $1`, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT ON (s.id) e.id::text,e.status,COALESCE(e.runtime,0),COALESCE(e.memory,0)
+		FROM submission_executions e JOIN submissions s ON s.id=e.submission_id
+		WHERE s.status='pending' AND e.status<>'pending'
+		AND NOT EXISTS (SELECT 1 FROM submission_executions pending WHERE pending.submission_id=s.id AND pending.status='pending')
+		ORDER BY s.id,e.created_at,e.id LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -433,7 +469,7 @@ func (s *ExecutionStore) TerminalPendingParents(ctx context.Context, limit int) 
 
 func (s *ExecutionStore) StaleTokenlessExecutions(ctx context.Context, olderThanSeconds int64, limit int) ([]string, error) {
 	cutoff := time.Now().Unix() - olderThanSeconds
-	rows, err := s.db.QueryContext(ctx, `SELECT id::text FROM submission_executions WHERE status='pending' AND judge0_token IS NULL AND created_at <= $1 LIMIT $2`, cutoff, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id::text FROM submission_executions WHERE status='pending' AND judge0_token IS NULL AND created_at <= $1 ORDER BY created_at,id LIMIT $2`, cutoff, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -449,4 +485,3 @@ func (s *ExecutionStore) StaleTokenlessExecutions(ctx context.Context, olderThan
 	}
 	return ids, rows.Err()
 }
-

@@ -4,10 +4,14 @@ import (
 	"app/internal/controllers"
 	"context"
 
+	_ "app/docs"
+	echoSwagger "github.com/swaggo/echo-swagger"
+
 	"firebase.google.com/go/v4/auth"
 	"github.com/labstack/echo/v4"
 	mdw "github.com/labstack/echo/v4/middleware"
 	"go.uber.org/fx"
+	"os"
 )
 
 func NewEchoServer(
@@ -45,6 +49,11 @@ func NewEchoServer(
 		},
 		AllowCredentials: true,
 	}))
+
+	// Swagger UI - only exposed in development environment or when explicitly enabled
+	if os.Getenv("STAGE") == "dev" || os.Getenv("ENABLE_SWAGGER") == "true" {
+		e.GET("/swagger/*", echoSwagger.WrapHandler)
+	}
 
 	// Health check endpoint
 	// This can be used by Kubernetes or any load balancer

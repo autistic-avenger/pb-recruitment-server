@@ -36,9 +36,9 @@ func NewClient() *Client {
 	}
 
 	return &Client{
-		baseURL:      os.Getenv("JUDGE0_URL"),
-		authToken:    os.Getenv("JUDGE0_AUTH_TOKEN"),
-		callbackBase: os.Getenv("JUDGE0_CALLBACK_BASE_URL"),
+		baseURL:        os.Getenv("JUDGE0_URL"),
+		authToken:      os.Getenv("JUDGE0_AUTH_TOKEN"),
+		callbackBase:   os.Getenv("JUDGE0_CALLBACK_BASE_URL"),
 		callbackSecret: os.Getenv("JUDGE0_CALLBACK_SECRET"),
 		httpClient: &http.Client{
 			Timeout: timeout,

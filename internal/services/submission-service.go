@@ -64,6 +64,13 @@ func (ss *SubmissionService) ListUserSubmissionsByProblemID(ctx context.Context,
 	return sub, nil
 }
 
+func (ss *SubmissionService) JudgeMCQ(ctx context.Context, submissionID string) error {
+	if err := ss.stores.Submissions.JudgeMCQ(ctx, submissionID); err != nil {
+		return ss.markSubmissionFailed(ctx, submissionID, err)
+	}
+	return nil
+}
+
 func (ss *SubmissionService) CreateSubmission(ctx context.Context, userID string, submissionType models.SubmissionType, req *dto.SubmitSubmissionRequest) (string, error) {
 	ctx, cancelPreparation := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelPreparation()
@@ -78,6 +85,16 @@ func (ss *SubmissionService) CreateSubmission(ctx context.Context, userID string
 		Option:    req.Option,
 	}
 
+	problem, err := ss.stores.Problems.GetProblem(ctx, req.ProblemID, req.ContestID)
+	if err != nil {
+		if errors.Is(err, common.ContestNotFoundError) {
+			return "", common.ErrNotFound
+		}
+		return "", err
+	}
+	if problem.Type != submissionType {
+		return "", common.ErrNotFound
+	}
 	if submissionType != models.Code {
 		return ss.stores.Submissions.CreateSubmission(ctx, sub)
 	}
@@ -93,11 +110,6 @@ func (ss *SubmissionService) CreateSubmission(ctx context.Context, userID string
 	languageID, err := judge0.LanguageID(req.Language)
 	if err != nil {
 		return "", common.ErrUnsupportedLanguage
-	}
-
-	problem, err := ss.stores.Problems.GetProblem(ctx, req.ProblemID, req.ContestID)
-	if err != nil {
-		return "", err
 	}
 
 	inputs, outputs, err := ss.loadTestcases(ctx, req.ContestID, req.ProblemID, problem.TestcasesKey)
@@ -248,8 +260,16 @@ func judgeRuntimeMillis(raw json.RawMessage) (int64, error) {
 }
 
 func (ss *SubmissionService) RecoverJudge0(ctx context.Context) {
+	if !ss.cursorMu.TryLock() {
+		return
+	}
+	defer ss.cursorMu.Unlock()
+
+	// Allow late callbacks after the bounded dispatch path before failing orphaned jobs.
 	staleIDs, err := ss.stores.Executions.StaleTokenlessExecutions(ctx, 300, 50)
-	if err == nil && len(staleIDs) > 0 {
+	if err != nil {
+		log.Errorf("judge0 recovery list stale tokenless failed: %v", err)
+	} else if len(staleIDs) > 0 {
 		if err := ss.stores.Executions.MarkFailed(ctx, staleIDs); err != nil {
 			log.Errorf("judge0 recovery cleanup stale tokenless failed: %v", err)
 		}
@@ -269,25 +289,17 @@ func (ss *SubmissionService) RecoverJudge0(ctx context.Context) {
 		}
 	}
 
-	ss.cursorMu.Lock()
-	cTime, cID := ss.recoveryCursorTime, ss.recoveryCursorID
-	ss.cursorMu.Unlock()
-
-	items, nextTime, nextID, err := ss.stores.Executions.PendingWithTokens(ctx, 50, cTime, cID)
+	items, err := ss.stores.Executions.PendingWithTokens(ctx, 50, ss.recoveryCursorTime, ss.recoveryCursorID)
 	if err != nil {
 		log.Errorf("judge0 recovery list failed: %v", err)
 		return
 	}
 
-	ss.cursorMu.Lock()
-	if len(items) < 50 {
+	if len(items) == 0 {
 		ss.recoveryCursorTime = 0
 		ss.recoveryCursorID = ""
-	} else {
-		ss.recoveryCursorTime = nextTime
-		ss.recoveryCursorID = nextID
+		return
 	}
-	ss.cursorMu.Unlock()
 
 	for _, item := range items {
 		if ctx.Err() != nil {
@@ -295,8 +307,10 @@ func (ss *SubmissionService) RecoverJudge0(ctx context.Context) {
 			break
 		}
 		callCtx, cancel := context.WithTimeout(ctx, ss.judge0.Timeout())
-		result, e := ss.judge0.GetSubmission(callCtx, item.Token)
+		result, e := ss.judge0.GetSubmission(callCtx, item.Judge0Token)
 		cancel()
+		// Advance only past attempted jobs so a timeout cannot skip the rest of the page.
+		ss.recoveryCursorTime, ss.recoveryCursorID = item.CreatedAt, item.ID
 		if e != nil || result == nil {
 			continue
 		}
@@ -307,7 +321,7 @@ func (ss *SubmissionService) RecoverJudge0(ctx context.Context) {
 		payload := judge0.CallbackResult{Token: result.Token, Time: result.Time, Memory: result.Memory}
 		payload.Status.ID = result.Status.ID
 		if payload.Token == "" {
-			payload.Token = item.Token
+			payload.Token = item.Judge0Token
 		}
 		if e = ss.HandleJudge0Callback(ctx, item.ID, payload); e != nil {
 			log.Errorf("judge0 recovery result failed: %v", e)
@@ -316,17 +330,33 @@ func (ss *SubmissionService) RecoverJudge0(ctx context.Context) {
 }
 
 func NewJudge0Recovery(lc fx.Lifecycle, ss *SubmissionService) {
+	workerCtx, stop := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	lc.Append(fx.Hook{OnStart: func(context.Context) error {
 		go func() {
+			defer close(done)
 			ticker := time.NewTicker(15 * time.Second)
 			defer ticker.Stop()
-			for range ticker.C {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				ss.RecoverJudge0(ctx)
-				cancel()
+			for {
+				select {
+				case <-workerCtx.Done():
+					return
+				case <-ticker.C:
+					ctx, cancel := context.WithTimeout(workerCtx, 30*time.Second)
+					ss.RecoverJudge0(ctx)
+					cancel()
+				}
 			}
 		}()
 		return nil
+	}, OnStop: func(ctx context.Context) error {
+		stop()
+		select {
+		case <-done:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}})
 }
 
