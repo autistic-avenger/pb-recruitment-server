@@ -112,12 +112,17 @@ func (cc *ContestController) HandleUpdateContest(ctx echo.Context) error {
 
 	// Verify contest exists
 	id := ctx.Param("id")
-	_, err := cc.contestService.GetContest(ctx.Request().Context(), id, "")
+	contest, err := cc.contestService.GetContest(ctx.Request().Context(), id, "")
 	if err != nil {
 		if errors.Is(err, common.ContestNotFoundError) {
 			return ctx.NoContent(http.StatusNotFound)
 		}
 		return ctx.NoContent(http.StatusInternalServerError)
+	}
+	if contest.GetRunningStatus() != models.ContestRunningUpcoming && req.StartTime != contest.StartTime {
+		return ctx.JSON(http.StatusConflict, map[string]string{
+			"error": "start time cannot be changed after the contest starts",
+		})
 	}
 
 	contestToUpdate := models.Contest{
@@ -175,6 +180,9 @@ func (cc *ContestController) HandleCreateProblem(ctx echo.Context) error {
 
 	createdProblem, err := cc.contestService.CreateProblem(ctx.Request().Context(), contestID, req)
 	if err != nil {
+		if errors.Is(err, common.ErrInvalidAnswer) {
+			return ctx.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
 		return ctx.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "failed to create problem",
 		})
@@ -197,6 +205,12 @@ func (cc *ContestController) HandleUpdateProblem(ctx echo.Context) error {
 
 	updatedProblem, err := cc.contestService.UpdateProblem(ctx.Request().Context(), contestID, problemID, req)
 	if err != nil {
+		if errors.Is(err, common.ErrInvalidAnswer) {
+			return ctx.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		if errors.Is(err, common.ErrProblemsLocked) {
+			return ctx.JSON(http.StatusConflict, map[string]string{"error": err.Error()})
+		}
 		return ctx.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "failed to update problem",
 		})
@@ -217,6 +231,9 @@ func (cc *ContestController) HandleDeleteProblem(ctx echo.Context) error {
 
 	err := cc.contestService.DeleteProblem(ctx.Request().Context(), contestID, problemID)
 	if err != nil {
+		if errors.Is(err, common.ErrProblemsLocked) {
+			return ctx.JSON(http.StatusConflict, map[string]string{"error": err.Error()})
+		}
 		if errors.Is(err, common.ContestNotFoundError) {
 			return ctx.JSON(http.StatusNotFound, map[string]string{
 				"error": "problem not found",

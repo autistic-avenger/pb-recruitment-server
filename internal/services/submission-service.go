@@ -58,6 +58,13 @@ func (ss *SubmissionService) ListUserSubmissionsByProblemID(ctx context.Context,
 	return sub, nil
 }
 
+func (ss *SubmissionService) JudgeMCQ(ctx context.Context, submissionID string) error {
+	if err := ss.stores.Submissions.JudgeMCQ(ctx, submissionID); err != nil {
+		return ss.markSubmissionFailed(ctx, submissionID, err)
+	}
+	return nil
+}
+
 func (ss *SubmissionService) CreateSubmission(ctx context.Context, userID string, submissionType models.SubmissionType, req *dto.SubmitSubmissionRequest) (string, error) {
 	ctx, cancelPreparation := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelPreparation()
@@ -72,6 +79,16 @@ func (ss *SubmissionService) CreateSubmission(ctx context.Context, userID string
 		Option:    req.Option,
 	}
 
+	problem, err := ss.stores.Problems.GetProblem(ctx, req.ProblemID, req.ContestID)
+	if err != nil {
+		if errors.Is(err, common.ContestNotFoundError) {
+			return "", common.ErrNotFound
+		}
+		return "", err
+	}
+	if problem.Type != submissionType {
+		return "", common.ErrNotFound
+	}
 	if submissionType != models.Code {
 		return ss.stores.Submissions.CreateSubmission(ctx, sub)
 	}
@@ -87,11 +104,6 @@ func (ss *SubmissionService) CreateSubmission(ctx context.Context, userID string
 	languageID, err := judge0.LanguageID(req.Language)
 	if err != nil {
 		return "", common.ErrUnsupportedLanguage
-	}
-
-	problem, err := ss.stores.Problems.GetProblem(ctx, req.ProblemID, req.ContestID)
-	if err != nil {
-		return "", err
 	}
 
 	inputs, outputs, err := ss.loadTestcases(ctx, req.ContestID, req.ProblemID, problem.TestcasesKey)
