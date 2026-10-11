@@ -93,6 +93,8 @@ func TestCreateSubmissionFailureBookkeeping(t *testing.T) {
 		invalidBody      bool
 		missingTokens    bool
 		serverFailure    bool
+		queueFull        bool
+		validationError  bool
 	}{
 		{name: "token save timeout", timeoutSave: true},
 		{name: "failure status write error", markErr: writeErr},
@@ -106,6 +108,8 @@ func TestCreateSubmissionFailureBookkeeping(t *testing.T) {
 		{name: "callbacks enabled invalid body", callbacksEnabled: true, invalidBody: true},
 		{name: "callbacks enabled missing tokens", callbacksEnabled: true, missingTokens: true},
 		{name: "callbacks enabled server failure", callbacksEnabled: true, serverFailure: true},
+		{name: "callbacks enabled queue full", callbacksEnabled: true, queueFull: true},
+		{name: "callbacks enabled per-entry validation error", callbacksEnabled: true, validationError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			objects := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -161,17 +165,24 @@ func TestCreateSubmissionFailureBookkeeping(t *testing.T) {
 					w.Write([]byte(`[{"token":"`))
 					return
 				}
-				if tc.invalidBody || tc.missingTokens {
+				if tc.invalidBody || tc.missingTokens || tc.validationError {
 					w.WriteHeader(http.StatusCreated)
 					if tc.invalidBody {
 						w.Write([]byte(`[{`))
+					} else if tc.validationError {
+						w.Write([]byte(`[{"memory_limit":["exceeds maximum"]}]`))
 					} else {
 						w.Write([]byte(`[]`))
 					}
 					return
 				}
 				if tc.serverFailure {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				if tc.queueFull {
 					w.WriteHeader(http.StatusServiceUnavailable)
+					w.Write([]byte(`{"error":"queue is full"}`))
 					return
 				}
 				if tc.timeoutSave {

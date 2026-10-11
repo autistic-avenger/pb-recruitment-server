@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,7 +33,7 @@ type Client struct {
 const maxDispatchTimeout = 10 * time.Second
 
 func NewClient() *Client {
-	callbackBase, callbackSecret := os.Getenv("JUDGE0_CALLBACK_BASE_URL"), os.Getenv("JUDGE0_CALLBACK_SECRET")
+	callbackBase, callbackSecret := strings.TrimRight(os.Getenv("JUDGE0_CALLBACK_BASE_URL"), "/"), os.Getenv("JUDGE0_CALLBACK_SECRET")
 	if (callbackBase == "") != (callbackSecret == "") {
 		log.Errorf("Judge0 callbacks are misconfigured: JUDGE0_CALLBACK_BASE_URL and JUDGE0_CALLBACK_SECRET must be set together")
 	}
@@ -44,7 +45,7 @@ func NewClient() *Client {
 	}
 
 	return &Client{
-		baseURL:        os.Getenv("JUDGE0_URL"),
+		baseURL:        strings.TrimRight(os.Getenv("JUDGE0_URL"), "/"),
 		authToken:      os.Getenv("JUDGE0_AUTH_TOKEN"),
 		callbackBase:   callbackBase,
 		callbackSecret: callbackSecret,
@@ -189,16 +190,16 @@ func (c *Client) postBatch(ctx context.Context, jobs []SubmissionRequest) ([]Sub
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
-	}
-
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		failure := ErrUnavailable
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		// Judge0 rejects a full queue with 503 before creating any jobs.
+		if (resp.StatusCode >= 400 && resp.StatusCode < 500) || resp.StatusCode == http.StatusServiceUnavailable {
 			failure = ErrDispatchRejected
 		}
 		return nil, fmt.Errorf("%w: status %d: %s", failure, resp.StatusCode, string(body))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 
 	var tokens []batchTokenResponse
@@ -208,8 +209,12 @@ func (c *Client) postBatch(ctx context.Context, jobs []SubmissionRequest) ([]Sub
 
 	results := make([]SubmissionResult, len(jobs))
 	for i := range jobs {
-		if i >= len(tokens) || tokens[i].Token == "" {
+		if i >= len(tokens) {
 			results[i] = SubmissionResult{Error: ErrInvalidResponse}
+			continue
+		}
+		if tokens[i].Token == "" {
+			results[i] = SubmissionResult{Error: ErrDispatchRejected}
 			continue
 		}
 		results[i] = SubmissionResult{Token: tokens[i].Token}

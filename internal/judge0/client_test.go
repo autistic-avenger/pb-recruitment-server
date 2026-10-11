@@ -5,9 +5,88 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestBatchRejections(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   []error
+	}{
+		{"queue full", 503, `{"error":"queue is full"}`, []error{ErrDispatchRejected, ErrDispatchRejected}},
+		{"invalid request", 422, `[{"memory_limit":["exceeds maximum"]}]`, []error{ErrDispatchRejected, ErrDispatchRejected}},
+		{"mixed validation", 201, `[{"token":"accepted"},{"memory_limit":["exceeds maximum"]}]`, []error{nil, ErrDispatchRejected}},
+		{"empty entry", 201, `[{"token":"accepted"},{}]`, []error{nil, ErrDispatchRejected}},
+		{"missing entry", 201, `[{"token":"accepted"}]`, []error{nil, ErrInvalidResponse}},
+		{"internal error", 500, `{}`, []error{ErrUnavailable, ErrUnavailable}},
+		{"bad gateway", 502, `{}`, []error{ErrUnavailable, ErrUnavailable}},
+		{"gateway timeout", 504, `{}`, []error{ErrUnavailable, ErrUnavailable}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			t.Setenv("JUDGE0_URL", server.URL)
+			t.Setenv("JUDGE0_BATCH_SIZE", "20")
+			results, _ := NewClient().CreateBatch(context.Background(), make([]SubmissionRequest, 2))
+			if len(results) != len(tc.want) {
+				t.Fatalf("results = %+v", results)
+			}
+			for i, want := range tc.want {
+				if !errors.Is(results[i].Error, want) {
+					t.Errorf("result %d error = %v, want %v", i, results[i].Error, want)
+				}
+				if want == nil && results[i].Token != "accepted" {
+					t.Errorf("accepted token lost: %+v", results[i])
+				}
+			}
+		})
+	}
+}
+
+func TestURLTrailingSlashes(t *testing.T) {
+	for _, suffix := range []string{"", "/", "///"} {
+		t.Run(suffix, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.Contains(r.URL.Path, "//") {
+					t.Errorf("double slash in Judge0 request: %s", r.URL.Path)
+				}
+				if r.Method == http.MethodPost {
+					w.WriteHeader(http.StatusCreated)
+					w.Write([]byte(`[{"token":"accepted"}]`))
+				} else {
+					w.Write([]byte(`{"token":"accepted","status":{"id":3}}`))
+				}
+			}))
+			defer server.Close()
+			t.Setenv("JUDGE0_URL", server.URL+suffix)
+			t.Setenv("JUDGE0_CALLBACK_BASE_URL", "https://example.test"+suffix)
+			t.Setenv("JUDGE0_CALLBACK_SECRET", "test-secret")
+			client := NewClient()
+			id := "e032ee69-cfd1-4350-b083-cc6e9822e9ec"
+			callback, err := url.Parse(client.CallbackURL(id))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if callback.Path != "/internal/judge0/callback/"+id || !client.VerifyCallback(id, callback.Query().Get("sig")) {
+				t.Fatalf("invalid callback path or signature: %s", callback.Path)
+			}
+			if _, err := client.CreateBatch(context.Background(), []SubmissionRequest{{}}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.GetSubmission(context.Background(), "accepted"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
 
 func TestBatchBodyReadFailureIsAmbiguous(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
