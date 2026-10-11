@@ -205,18 +205,6 @@ func (sc *SubmissionController) SubmitSolution(ctx echo.Context) error {
 		return ctx.JSON(http.StatusForbidden, map[string]string{"error": common.ContestNotRunningError.Error()})
 	}
 
-	if err := sc.submissionService.CheckRateLimit(reqCtx, userID); err != nil {
-		if errors.Is(err, common.ErrRateLimitExceeded) {
-			return ctx.JSON(http.StatusTooManyRequests, map[string]string{
-				"error": err.Error(),
-			})
-		}
-		log.Errorf("failed to check rate limit for user %s: %v", userID, err)
-		return ctx.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "failed to check submission rate limit",
-		})
-	}
-
 	submissionType := req.Type
 
 	submissionID, err := sc.submissionService.CreateSubmission(reqCtx, userID, submissionType, req)
@@ -229,6 +217,11 @@ func (sc *SubmissionController) SubmitSolution(ctx echo.Context) error {
 		}
 		if errors.Is(err, common.ErrUnsupportedLanguage) || errors.Is(err, common.ErrNoTestcases) || errors.Is(err, common.ErrInvalidCode) {
 			return ctx.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		if errors.Is(err, common.ErrRateLimitExceeded) {
+			return ctx.JSON(http.StatusTooManyRequests, map[string]string{
+				"error": err.Error(),
+			})
 		}
 		return ctx.NoContent(http.StatusInternalServerError)
 	}

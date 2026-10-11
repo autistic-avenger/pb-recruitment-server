@@ -446,3 +446,102 @@ func TestSubmissionServiceRateLimit(t *testing.T) {
 		t.Errorf("expected cooldown from env to be 7, got %d", checkedCooldown)
 	}
 }
+
+func TestCreateSubmissionValidationBeforeRateLimit(t *testing.T) {
+	rateLimitCalled := false
+	subInserted := false
+
+	storage := &stores.Storage{
+		Problems: problemTestStore{
+			getProblem: func(ctx context.Context, problemID, contestID string) (*dto.GetProblemStatementResponse, error) {
+				return &dto.GetProblemStatementResponse{
+					Type: models.Code,
+				}, nil
+			},
+		},
+		Submissions: submissionTestStore{
+			checkRateLimit: func(ctx context.Context, userID string, cooldown int64) error {
+				rateLimitCalled = true
+				return nil
+			},
+			createSubmission: func(ctx context.Context, sub *models.Submission) (string, error) {
+				subInserted = true
+				return "sub-1", nil
+			},
+		},
+	}
+
+	svc := NewSubmissionService(storage, nil, nil)
+
+	// Unsupported language should fail validation and not trigger rate limit check
+	_, err := svc.CreateSubmission(context.Background(), "user", models.Code, &dto.SubmitSubmissionRequest{
+		ContestID: "c1",
+		ProblemID: "p1",
+		Type:      models.Code,
+		Language:  "unsupported_lang",
+		Code:      base64.StdEncoding.EncodeToString([]byte("print(1)")),
+	})
+	if !errors.Is(err, common.ErrUnsupportedLanguage) {
+		t.Fatalf("expected ErrUnsupportedLanguage, got %v", err)
+	}
+	if rateLimitCalled {
+		t.Error("rate limit should not be checked when language is unsupported")
+	}
+	if subInserted {
+		t.Error("submission should not be inserted when language is unsupported")
+	}
+
+	// MCQ problem type mismatch fails before rate limit check
+	rateLimitCalled = false
+	subInserted = false
+	_, err = svc.CreateSubmission(context.Background(), "user", models.MCQ, &dto.SubmitSubmissionRequest{
+		ContestID: "c1",
+		ProblemID: "p1",
+		Type:      models.MCQ,
+		Option:    []int{0},
+	})
+	if !errors.Is(err, common.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for problem type mismatch, got %v", err)
+	}
+	if rateLimitCalled {
+		t.Error("rate limit should not be checked when problem type does not match")
+	}
+
+	// Rate limit exceeded prevents store insertion for MCQ
+	storage.Problems = problemTestStore{
+		getProblem: func(ctx context.Context, problemID, contestID string) (*dto.GetProblemStatementResponse, error) {
+			return &dto.GetProblemStatementResponse{
+				Type: models.MCQ,
+			}, nil
+		},
+	}
+	storage.Submissions = submissionTestStore{
+		checkRateLimit: func(ctx context.Context, userID string, cooldown int64) error {
+			rateLimitCalled = true
+			return common.ErrRateLimitExceeded
+		},
+		createSubmission: func(ctx context.Context, sub *models.Submission) (string, error) {
+			subInserted = true
+			return "sub-1", nil
+		},
+	}
+
+	rateLimitCalled = false
+	subInserted = false
+	_, err = svc.CreateSubmission(context.Background(), "user", models.MCQ, &dto.SubmitSubmissionRequest{
+		ContestID: "c1",
+		ProblemID: "p1",
+		Type:      models.MCQ,
+		Option:    []int{0},
+	})
+	if !errors.Is(err, common.ErrRateLimitExceeded) {
+		t.Fatalf("expected ErrRateLimitExceeded, got %v", err)
+	}
+	if !rateLimitCalled {
+		t.Error("rate limit should be checked before store insert")
+	}
+	if subInserted {
+		t.Error("submission should not be inserted when rate limit is exceeded")
+	}
+}
+

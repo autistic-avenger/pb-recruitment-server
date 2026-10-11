@@ -53,9 +53,10 @@ all migrations through `000027`, and clean up afterward. They skip when
 TEST_DATABASE_URL='postgres://user:password@localhost/test_db' go test -race ./internal/stores -count=1
 ```
 
-## Judge0 deployment
+## Judge0 deployment & Environment configuration
 
-- Apply migrations through `000027` before deploying this build; use PostgreSQL 12+.
+- Apply migrations through `000027` (`submission_rate_limits`) to the target database before merging/deploying this build; use PostgreSQL 12+.
+- Set `SUBMISSION_RATE_LIMIT_SECONDS` (default: 5s) and `LEADERBOARD_CACHE_TTL_SECONDS` (default: 3s, max: 60s) identically across backend replicas.
 - Set `JUDGE0_URL` and `JUDGE0_AUTH_TOKEN`. Keep the Judge0 API inaccessible to contestants.
 - Enable callbacks with `JUDGE0_CALLBACK_BASE_URL` and the same `JUDGE0_CALLBACK_SECRET`
   on every backend replica. Verify a signed callback reaches the backend from Judge0.

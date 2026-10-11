@@ -120,6 +120,9 @@ func (ss *SubmissionService) CreateSubmission(ctx context.Context, userID string
 		return "", common.ErrNotFound
 	}
 	if submissionType != models.Code {
+		if err := ss.CheckRateLimit(ctx, userID); err != nil {
+			return "", err
+		}
 		return ss.stores.Submissions.CreateSubmission(ctx, sub)
 	}
 
@@ -142,6 +145,10 @@ func (ss *SubmissionService) CreateSubmission(ctx context.Context, userID string
 	}
 	if len(inputs) == 0 {
 		return "", common.ErrNoTestcases
+	}
+
+	if err := ss.CheckRateLimit(ctx, userID); err != nil {
+		return "", err
 	}
 
 	submissionID, err := ss.stores.Submissions.CreateSubmission(ctx, sub)

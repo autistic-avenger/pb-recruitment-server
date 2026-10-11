@@ -30,6 +30,9 @@ func NewRankingStore(db *sql.DB) *RankingStore {
 	ttl := 3 * time.Second
 	if ttlStr := os.Getenv("LEADERBOARD_CACHE_TTL_SECONDS"); ttlStr != "" {
 		if sec, err := strconv.Atoi(ttlStr); err == nil && sec >= 0 {
+			if sec > 60 {
+				sec = 60
+			}
 			ttl = time.Duration(sec) * time.Second
 		}
 	}
@@ -127,8 +130,8 @@ func (s *RankingStore) UpdateLeaderboardUser(ctx context.Context, contestID stri
 const leaderboardPageSize = 20
 
 func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, page int) (*dto.GetLeaderboardResponse, error) {
-	if s == nil || s.db == nil {
-		return nil, fmt.Errorf("ranking store: db is not initialized")
+	if s == nil {
+		return nil, fmt.Errorf("ranking store: not initialized")
 	}
 
 	page = max(0, page)
@@ -141,6 +144,10 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 		if ok && time.Now().Before(entry.expiresAt) {
 			return cloneLeaderboardResponse(entry.data), nil
 		}
+	}
+
+	if s.db == nil {
+		return nil, fmt.Errorf("ranking store: db is not initialized")
 	}
 
 	const checkContestQ = `SELECT EXISTS(SELECT 1 FROM contests WHERE id = $1)`
@@ -230,7 +237,7 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 		TotalCount: totalCount,
 	}
 
-	if s.cacheTTL > 0 {
+	if s.cacheTTL > 0 && page < max(totalPages, 1) {
 		s.cacheMu.Lock()
 		s.cache[cacheKey] = leaderboardCacheEntry{
 			data:      resp,

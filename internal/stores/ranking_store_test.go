@@ -1,6 +1,7 @@
 package stores
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -82,35 +83,30 @@ func TestLeaderboardCache(t *testing.T) {
 	}
 	store.cacheMu.Unlock()
 
-	// Should hit cache
-	store.cacheMu.RLock()
-	entry, ok := store.cache[key]
-	store.cacheMu.RUnlock()
-	if !ok || time.Now().After(entry.expiresAt) {
-		t.Fatal("expected cached entry to be present and not expired")
+	// Should hit cache via GetLeaderboard
+	resp, err := store.GetLeaderboard(context.Background(), contestID, page)
+	if err != nil {
+		t.Fatalf("expected cache hit from GetLeaderboard, got error: %v", err)
 	}
-
-	cloned := cloneLeaderboardResponse(entry.data)
-	if cloned == nil || len(cloned.Entries) != 1 || cloned.Entries[0].Username != "Alice" {
-		t.Fatalf("unexpected cloned data: %+v", cloned)
+	if resp == nil || len(resp.Entries) != 1 || resp.Entries[0].Username != "Alice" {
+		t.Fatalf("unexpected cached data: %+v", resp)
 	}
 
 	// Mutating cloned response should not alter internal cache
-	cloned.Entries[0].Username = "Bob"
-	store.cacheMu.RLock()
-	cachedUsername := store.cache[key].data.Entries[0].Username
-	store.cacheMu.RUnlock()
-	if cachedUsername != "Alice" {
-		t.Errorf("cache was mutated by clone modification, got %s, want Alice", cachedUsername)
+	resp.Entries[0].Username = "Bob"
+	respAgain, err := store.GetLeaderboard(context.Background(), contestID, page)
+	if err != nil {
+		t.Fatalf("expected second cache hit: %v", err)
+	}
+	if respAgain.Entries[0].Username != "Alice" {
+		t.Errorf("cache was mutated by clone modification, got %s, want Alice", respAgain.Entries[0].Username)
 	}
 
 	// Invalidate cache for contest
 	store.InvalidateCache(contestID)
-	store.cacheMu.RLock()
-	_, ok = store.cache[key]
-	store.cacheMu.RUnlock()
-	if ok {
-		t.Error("expected cache entry to be invalidated")
+	// Cache miss should attempt DB query and fail because db is nil
+	if _, err := store.GetLeaderboard(context.Background(), contestID, page); err == nil {
+		t.Fatal("expected DB error after cache invalidation")
 	}
 
 	// Test expiration
@@ -121,13 +117,8 @@ func TestLeaderboardCache(t *testing.T) {
 	}
 	store.cacheMu.Unlock()
 
-	store.cacheMu.RLock()
-	expiredEntry, ok := store.cache[key]
-	store.cacheMu.RUnlock()
-	if !ok {
-		t.Fatal("entry should exist in map")
-	}
-	if !time.Now().After(expiredEntry.expiresAt) {
-		t.Error("expected entry to be expired")
+	// Expired entry should be treated as cache miss and attempt DB query
+	if _, err := store.GetLeaderboard(context.Background(), contestID, page); err == nil {
+		t.Fatal("expected DB error for expired entry")
 	}
 }

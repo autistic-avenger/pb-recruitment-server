@@ -444,10 +444,7 @@ func (s *SubmissionStore) CheckSubmissionRateLimit(ctx context.Context, userID s
 	now := time.Now().Unix()
 	const q = `
 		INSERT INTO submission_rate_limits (user_id, last_submission_at)
-		SELECT $1, $2
-		WHERE NOT EXISTS (
-			SELECT 1 FROM submissions WHERE user_id = $1 AND $2 - created_at < $3
-		)
+		VALUES ($1, $2)
 		ON CONFLICT (user_id) DO UPDATE
 		SET last_submission_at = EXCLUDED.last_submission_at
 		WHERE EXCLUDED.last_submission_at - submission_rate_limits.last_submission_at >= $3
