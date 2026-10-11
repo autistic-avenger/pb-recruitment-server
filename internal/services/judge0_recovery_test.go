@@ -4,6 +4,7 @@ import (
 	"app/internal/judge0"
 	"app/internal/models"
 	"app/internal/stores"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/labstack/gommon/log"
 	"go.uber.org/fx"
 )
 
@@ -124,6 +126,10 @@ func TestRecoveryRequiresConfirmedIdle(t *testing.T) {
 		{"mixed queues", `[{"queue":"a","size":0,"available":1,"working":0},{"queue":"b","size":1,"available":1,"working":0}]`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var output bytes.Buffer
+			previous := log.Output()
+			log.SetOutput(&output)
+			defer log.SetOutput(previous)
 			store := &recoveryTestStore{
 				items:     []models.Execution{{ID: "a", Judge0Token: "queued", CreatedAt: 1}, {ID: "b", Judge0Token: "processing", CreatedAt: 1}, {ID: "c", Judge0Token: "accepted", CreatedAt: 1}},
 				tokenless: []models.Execution{{ID: "lost", CreatedAt: 1}, {ID: "recent", CreatedAt: time.Now().Unix()}},
@@ -140,6 +146,12 @@ func TestRecoveryRequiresConfirmedIdle(t *testing.T) {
 			t.Setenv("JUDGE0_BATCH_SIZE", "20")
 			ss := NewSubmissionService(&stores.Storage{Executions: store}, nil, judge0.NewClient())
 			ss.RecoverJudge0(context.Background())
+			if tc.name == "no workers" {
+				logged := output.String()
+				if !strings.Contains(logged, "judge0 recovery worker observation failed") || !strings.Contains(logged, "no available workers") || !strings.Contains(logged, "1.13.1") {
+					t.Fatalf("missing actionable worker warning: %s", logged)
+				}
+			}
 			if len(store.marked) != 0 || len(store.finals) != 1 || store.finals[0].Status != "accepted" {
 				t.Fatalf("first observation: marked=%v, finals=%+v", store.marked, store.finals)
 			}

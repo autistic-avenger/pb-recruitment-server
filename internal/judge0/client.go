@@ -217,7 +217,10 @@ func (c *Client) WorkersIdle(ctx context.Context) (bool, error) {
 		if queue.Queue == "" || queue.Size == nil || queue.Working == nil || queue.Available == nil || *queue.Size < 0 || *queue.Working < 0 || *queue.Available < *queue.Working {
 			return false, ErrInvalidResponse
 		}
-		idle = idle && *queue.Size == 0 && *queue.Working == 0 && *queue.Available > 0
+		if *queue.Available == 0 {
+			return false, fmt.Errorf("%w: %q", ErrNoWorkers, queue.Queue)
+		}
+		idle = idle && *queue.Size == 0 && *queue.Working == 0
 	}
 	return idle, nil
 }
