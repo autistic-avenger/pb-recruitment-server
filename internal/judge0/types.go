@@ -11,6 +11,7 @@ type SubmissionRequest struct {
 	MemoryLimit     float64 `json:"memory_limit"`
 	CallbackURL     string  `json:"callback_url,omitempty"`
 	CompilerOptions string  `json:"compiler_options,omitempty"`
+	EnableNetwork   bool    `json:"enable_network"`
 }
 
 type SubmissionResult struct {

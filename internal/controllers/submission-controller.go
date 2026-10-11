@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/gommon/log"
 )
 
 type SubmissionController struct {
@@ -47,6 +48,7 @@ func (sc *SubmissionController) Judge0Callback(c echo.Context) error {
 		return c.NoContent(http.StatusBadRequest)
 	}
 	if err := sc.submissionService.HandleJudge0Callback(c.Request().Context(), id, payload); err != nil {
+		log.Errorf("judge0 callback failed for execution %s: %v", id, err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	return c.NoContent(http.StatusOK)

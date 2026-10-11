@@ -284,6 +284,53 @@ func TestExecutionRecoveryQueries(t *testing.T) {
 	assertSubmission(t, db, sub, "judge_error", 0, 0)
 }
 
+func TestTokenlessRecoveryWithCallbacks(t *testing.T) {
+	db := postgresTestDB(t)
+	user, contest, problem, sub, executions := executionFixture(t, db, 3)
+	lostSub, lostExecutions := executionSubmission(t, db, user, contest, problem, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"status":{"id":1}}`))
+	}))
+	defer server.Close()
+	t.Setenv("JUDGE0_URL", server.URL)
+	t.Setenv("JUDGE0_AUTH_TOKEN", "")
+	t.Setenv("JUDGE0_CALLBACK_BASE_URL", "https://example.test")
+	t.Setenv("JUDGE0_CALLBACK_SECRET", "test-secret")
+	client := judge0.NewClient()
+	storage := stores.NewStorage(db)
+	old := time.Now().Unix() - 1200
+	if _, err := db.Exec(`UPDATE submission_executions SET created_at=$2 WHERE id=$1`, lostExecutions[0].ID, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE submission_executions SET created_at=$2 WHERE id IN ($1,$3)`, executions[0].ID, old, executions[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE submission_executions SET created_at=$2 WHERE id=$1`, executions[2].ID, time.Now().Unix()-500); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Executions.SaveTokens(context.Background(), map[string]string{executions[1].ID: uuid.NewString()}); err != nil {
+		t.Fatal(err)
+	}
+	service := services.NewSubmissionService(storage, nil, client)
+	service.RecoverJudge0(context.Background())
+	assertSubmission(t, db, lostSub, "judge_error", 0, 0)
+	for i, want := range []string{"judge_error", "pending", "pending"} {
+		var status string
+		if err := db.QueryRow(`SELECT status FROM submission_executions WHERE id=$1`, executions[i].ID).Scan(&status); err != nil || status != want {
+			t.Fatalf("execution %d: status=%s, err=%v", i, status, err)
+		}
+	}
+	// A callback arriving after the grace period must not overwrite failure cleanup.
+	if err := storage.Executions.ProcessFinal(context.Background(), stores.FinalExecutionResult{ExecutionID: executions[0].ID, Token: uuid.NewString(), Status: "accepted"}); err != nil {
+		t.Fatal(err)
+	}
+	results, err := storage.Submissions.GetTestCaseResultsBySubmissionID(context.Background(), sub)
+	if err != nil || len(results) != 1 || results[0].TestCaseID != "0" || results[0].Status != "judge_error" {
+		t.Fatalf("recovered results: %+v, %v", results, err)
+	}
+	assertSubmission(t, db, sub, "pending", 0, 0)
+}
+
 func TestReconcileStoredTerminalMetrics(t *testing.T) {
 	db := postgresTestDB(t)
 	_, _, _, sub, executions := executionFixture(t, db, 2)

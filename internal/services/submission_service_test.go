@@ -9,6 +9,7 @@ import (
 	"app/internal/stores"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -81,17 +82,30 @@ func (s executionTestStore) MarkFailed(ctx context.Context, ids []string) error 
 func TestCreateSubmissionFailureBookkeeping(t *testing.T) {
 	writeErr := errors.New("failure status write failed")
 	for _, tc := range []struct {
-		name        string
-		timeoutSave bool
-		markErr     error
-		failUpload  bool
-		failInsert  bool
+		name             string
+		timeoutSave      bool
+		markErr          error
+		failUpload       bool
+		failInsert       bool
+		callbacksEnabled bool
+		networkFailure   bool
+		bodyFailure      bool
+		invalidBody      bool
+		missingTokens    bool
+		serverFailure    bool
 	}{
 		{name: "token save timeout", timeoutSave: true},
 		{name: "failure status write error", markErr: writeErr},
 		{name: "code upload failure", failUpload: true},
 		{name: "execution insertion failure", failInsert: true},
 		{name: "preparation cleanup failure", failInsert: true, markErr: writeErr},
+		{name: "callbacks enabled token save timeout", callbacksEnabled: true, timeoutSave: true},
+		{name: "callbacks enabled network failure", callbacksEnabled: true, networkFailure: true},
+		{name: "callbacks enabled body failure", callbacksEnabled: true, bodyFailure: true},
+		{name: "callbacks enabled explicit rejection", callbacksEnabled: true},
+		{name: "callbacks enabled invalid body", callbacksEnabled: true, invalidBody: true},
+		{name: "callbacks enabled missing tokens", callbacksEnabled: true, missingTokens: true},
+		{name: "callbacks enabled server failure", callbacksEnabled: true, serverFailure: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			objects := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -122,17 +136,60 @@ func TestCreateSubmissionFailureBookkeeping(t *testing.T) {
 				if tc.failUpload || tc.failInsert {
 					t.Error("dispatch must not run after preparation failure")
 				}
+				var payload struct {
+					Submissions []struct {
+						EnableNetwork *bool `json:"enable_network"`
+					} `json:"submissions"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || len(payload.Submissions) != 1 {
+					t.Errorf("invalid dispatch body: %+v, %v", payload, err)
+				} else if enabled := payload.Submissions[0].EnableNetwork; enabled == nil || *enabled {
+					t.Error("dispatch must explicitly disable network access")
+				}
+				if tc.networkFailure {
+					conn, _, err := w.(http.Hijacker).Hijack()
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					conn.Close()
+					return
+				}
+				if tc.bodyFailure {
+					w.Header().Set("Content-Length", "1000")
+					w.WriteHeader(http.StatusCreated)
+					w.Write([]byte(`[{"token":"`))
+					return
+				}
+				if tc.invalidBody || tc.missingTokens {
+					w.WriteHeader(http.StatusCreated)
+					if tc.invalidBody {
+						w.Write([]byte(`[{`))
+					} else {
+						w.Write([]byte(`[]`))
+					}
+					return
+				}
+				if tc.serverFailure {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
 				if tc.timeoutSave {
 					w.WriteHeader(http.StatusCreated)
 					w.Write([]byte(`[{"token":"token"}]`))
 				} else {
-					w.WriteHeader(http.StatusServiceUnavailable)
+					w.WriteHeader(http.StatusUnprocessableEntity)
 				}
 			}))
 			defer judge.Close()
 			t.Setenv("JUDGE0_URL", judge.URL)
 			t.Setenv("JUDGE0_AUTH_TOKEN", "")
 			t.Setenv("JUDGE0_CALLBACK_BASE_URL", "")
+			t.Setenv("JUDGE0_CALLBACK_SECRET", "")
+			if tc.callbacksEnabled {
+				t.Setenv("JUDGE0_CALLBACK_BASE_URL", "https://example.test")
+				t.Setenv("JUDGE0_CALLBACK_SECRET", "test-secret")
+			}
 			t.Setenv("JUDGE0_TIMEOUT_MS", "1000")
 			t.Setenv("JUDGE0_BATCH_SIZE", "20")
 
@@ -199,8 +256,9 @@ func TestCreateSubmissionFailureBookkeeping(t *testing.T) {
 				ContestID: "contest", ProblemID: "problem", Language: "cpp",
 				Code: base64.StdEncoding.EncodeToString([]byte("int main(){}")),
 			})
-			if !marked {
-				t.Error("failure bookkeeping was not called")
+			wantMarked := !(tc.callbacksEnabled && (tc.timeoutSave || tc.networkFailure || tc.bodyFailure || tc.invalidBody || tc.missingTokens || tc.serverFailure))
+			if marked != wantMarked {
+				t.Errorf("immediate failure bookkeeping = %v, want %v", marked, wantMarked)
 			}
 			if tc.failUpload || tc.failInsert {
 				if err == nil {

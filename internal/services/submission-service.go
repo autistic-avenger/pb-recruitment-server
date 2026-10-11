@@ -12,13 +12,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/labstack/gommon/log"
 	"go.uber.org/fx"
-	"strconv"
 )
 
 type SubmissionService struct {
@@ -191,7 +191,7 @@ func (ss *SubmissionService) CreateSubmission(ctx context.Context, userID string
 		refusedIDs := make([]string, 0)
 		for i, exec := range executions {
 			if i < len(results) && results[i].Error != nil {
-				if errors.Is(results[i].Error, judge0.ErrDispatchRejected) || errors.Is(results[i].Error, judge0.ErrInvalidResponse) {
+				if errors.Is(results[i].Error, judge0.ErrDispatchRejected) {
 					refusedIDs = append(refusedIDs, exec.ID)
 				}
 			}
@@ -292,11 +292,11 @@ func (ss *SubmissionService) RecoverJudge0(ctx context.Context) {
 		}
 	}
 
-	// Allow late callbacks after the bounded dispatch path before failing orphaned jobs.
-	staleIDs, err := ss.stores.Executions.StaleTokenlessExecutions(ctx, 300, 50)
+	// shortcut: allow ten minutes for queued callbacks; revisit after contest-load testing.
+	staleIDs, err := ss.stores.Executions.StaleTokenlessExecutions(ctx, 600, 50)
 	if err != nil {
 		log.Errorf("judge0 recovery list stale tokenless failed: %v", err)
-	} else if len(staleIDs) > 0 && !ss.judge0.CallbacksEnabled() {
+	} else if len(staleIDs) > 0 {
 		if err := ss.stores.Executions.MarkFailed(ctx, staleIDs); err != nil {
 			log.Errorf("judge0 recovery cleanup stale tokenless failed: %v", err)
 		}

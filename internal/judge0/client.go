@@ -190,11 +190,15 @@ func (c *Client) postBatch(ctx context.Context, jobs []SubmissionRequest) ([]Sub
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: status %d: %s", ErrDispatchRejected, resp.StatusCode, string(body))
+		failure := ErrUnavailable
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			failure = ErrDispatchRejected
+		}
+		return nil, fmt.Errorf("%w: status %d: %s", failure, resp.StatusCode, string(body))
 	}
 
 	var tokens []batchTokenResponse

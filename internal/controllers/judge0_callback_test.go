@@ -4,7 +4,9 @@ import (
 	"app/internal/judge0"
 	"app/internal/services"
 	"app/internal/stores"
+	"bytes"
 	"context"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,16 +14,43 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/gommon/log"
 )
 
 type callbackTestStore struct {
 	*stores.ExecutionStore
 	called bool
+	err    error
 }
 
 func (s *callbackTestStore) ProcessFinal(context.Context, stores.FinalExecutionResult) error {
 	s.called = true
-	return nil
+	return s.err
+}
+
+func TestJudge0CallbackLogsFailure(t *testing.T) {
+	t.Setenv("JUDGE0_CALLBACK_BASE_URL", "https://example.test")
+	t.Setenv("JUDGE0_CALLBACK_SECRET", "test-secret")
+	client := judge0.NewClient()
+	store := &callbackTestStore{err: sql.ErrNoRows}
+	controller := NewSubmissionController(services.NewSubmissionService(&stores.Storage{Executions: store}, nil, client), nil, client)
+	var output bytes.Buffer
+	previous := log.Output()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+	id := uuid.NewString()
+	sig := client.CallbackSignature(id)
+	w := httptest.NewRecorder()
+	ctx := echo.New().NewContext(httptest.NewRequest(http.MethodPut, "/internal/judge0/callback/"+id+"?sig="+sig, strings.NewReader(`{"token":"test-token","status":{"id":3}}`)), w)
+	ctx.SetParamNames("execution_id")
+	ctx.SetParamValues(id)
+	if err := controller.Judge0Callback(ctx); err != nil || w.Code != http.StatusInternalServerError {
+		t.Fatalf("failed callback: HTTP %d, %v", w.Code, err)
+	}
+	logged := output.String()
+	if !strings.Contains(logged, id) || !strings.Contains(logged, sql.ErrNoRows.Error()) || strings.Contains(logged, sig) || strings.Contains(logged, "test-token") {
+		t.Fatalf("failure log must contain execution and error without credentials: %s", logged)
+	}
 }
 
 func TestJudge0CallbackValidation(t *testing.T) {
