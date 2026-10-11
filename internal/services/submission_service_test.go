@@ -23,6 +23,14 @@ type submissionTestStore struct {
 	markFailed       func(context.Context, string) error
 	judgeMCQ         func(context.Context, string) error
 	createSubmission func(context.Context, *models.Submission) (string, error)
+	checkRateLimit   func(context.Context, string, int64) error
+}
+
+func (s submissionTestStore) CheckSubmissionRateLimit(ctx context.Context, userID string, cooldown int64) error {
+	if s.checkRateLimit != nil {
+		return s.checkRateLimit(ctx, userID, cooldown)
+	}
+	return nil
 }
 
 func (s submissionTestStore) CreateSubmission(ctx context.Context, sub *models.Submission) (string, error) {
@@ -396,5 +404,45 @@ func TestCreateSubmissionValidatesProblemBeforeInsert(t *testing.T) {
 				t.Errorf("ID=%q", id)
 			}
 		})
+	}
+}
+
+func TestSubmissionServiceRateLimit(t *testing.T) {
+	var checkedCooldown int64
+	var checkedUser string
+	storage := &stores.Storage{
+		Submissions: submissionTestStore{
+			checkRateLimit: func(_ context.Context, userID string, cooldown int64) error {
+				checkedUser = userID
+				checkedCooldown = cooldown
+				if userID == "spammer" {
+					return common.ErrRateLimitExceeded
+				}
+				return nil
+			},
+		},
+	}
+	svc := NewSubmissionService(storage, nil, nil)
+
+	// Normal user passes
+	if err := svc.CheckRateLimitWithCooldown(context.Background(), "alice", 10); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if checkedUser != "alice" || checkedCooldown != 10 {
+		t.Errorf("checkedUser=%s, checkedCooldown=%d", checkedUser, checkedCooldown)
+	}
+
+	// Spammer rejected
+	if err := svc.CheckRateLimitWithCooldown(context.Background(), "spammer", 5); !errors.Is(err, common.ErrRateLimitExceeded) {
+		t.Fatalf("expected ErrRateLimitExceeded, got %v", err)
+	}
+
+	// Environment variable fallback
+	t.Setenv("SUBMISSION_RATE_LIMIT_SECONDS", "7")
+	if err := svc.CheckRateLimit(context.Background(), "bob"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if checkedCooldown != 7 {
+		t.Errorf("expected cooldown from env to be 7, got %d", checkedCooldown)
 	}
 }

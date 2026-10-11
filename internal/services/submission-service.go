@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,6 +64,28 @@ func (ss *SubmissionService) ListUserSubmissionsByProblemID(ctx context.Context,
 		return nil, err
 	}
 	return sub, nil
+}
+
+func (ss *SubmissionService) CheckRateLimit(ctx context.Context, userID string) error {
+	if ss == nil || ss.stores == nil || ss.stores.Submissions == nil {
+		return nil
+	}
+
+	cooldown := int64(5) // default 5 seconds
+	if envVal := os.Getenv("SUBMISSION_RATE_LIMIT_SECONDS"); envVal != "" {
+		if val, err := strconv.ParseInt(envVal, 10, 64); err == nil {
+			cooldown = val
+		}
+	}
+
+	return ss.stores.Submissions.CheckSubmissionRateLimit(ctx, userID, cooldown)
+}
+
+func (ss *SubmissionService) CheckRateLimitWithCooldown(ctx context.Context, userID string, cooldown int64) error {
+	if ss == nil || ss.stores == nil || ss.stores.Submissions == nil {
+		return nil
+	}
+	return ss.stores.Submissions.CheckSubmissionRateLimit(ctx, userID, cooldown)
 }
 
 func (ss *SubmissionService) JudgeMCQ(ctx context.Context, submissionID string) error {

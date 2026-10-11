@@ -101,3 +101,43 @@ func TestSubmitSolutionContestWindow(t *testing.T) {
 		})
 	}
 }
+
+type rateLimitedSubmissionStore struct {
+	*stores.SubmissionStore
+	rateLimitErr error
+}
+
+func (s *rateLimitedSubmissionStore) CheckSubmissionRateLimit(ctx context.Context, userID string, cooldownSeconds int64) error {
+	return s.rateLimitErr
+}
+func (s *rateLimitedSubmissionStore) CreateSubmission(context.Context, *models.Submission) (string, error) {
+	return "submission", nil
+}
+func (s *rateLimitedSubmissionStore) JudgeMCQ(context.Context, string) error {
+	return nil
+}
+
+func TestSubmitSolutionRateLimit(t *testing.T) {
+	now := time.Now().UnixMilli()
+	storage := &stores.Storage{
+		Contests: submissionContestStore{
+			contest:    models.Contest{StartTime: now - 60_000, EndTime: now + 60_000},
+			registered: true,
+		},
+		Problems: submissionProblemStore{},
+		Submissions: &rateLimitedSubmissionStore{
+			rateLimitErr: common.ErrRateLimitExceeded,
+		},
+	}
+	controller := NewSubmissionController(services.NewSubmissionService(storage, nil, nil), services.NewContestService(storage, nil), nil)
+	recorder := httptest.NewRecorder()
+	ctx := echo.New().NewContext(httptest.NewRequest(http.MethodPost, "/submission/submit", nil), recorder)
+	ctx.Set(common.AUTH_USER_ID, "user")
+	ctx.Set(common.VALIDATED_REQUEST_BODY, &dto.SubmitSubmissionRequest{ContestID: "contest", ProblemID: "problem", Type: models.MCQ, Option: []int{1}})
+	if err := controller.SubmitSolution(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("HTTP %d, want 429", recorder.Code)
+	}
+}

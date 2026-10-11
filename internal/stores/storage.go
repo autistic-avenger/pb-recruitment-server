@@ -35,6 +35,7 @@ type Storage struct {
 		JudgeMCQ(context.Context, string) error
 		MarkFailed(context.Context, string) error
 		PendingCodeWithoutExecutions(context.Context, int64, int) ([]string, error)
+		CheckSubmissionRateLimit(context.Context, string, int64) error
 	}
 	Executions interface {
 		InsertBatch(ctx context.Context, submissionID string, indexes []int) ([]models.Execution, error)
