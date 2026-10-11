@@ -2,12 +2,17 @@ package stores
 
 import (
 	"app/internal/common"
+	"app/internal/models"
 	"app/internal/models/dto"
 	"context"
 	"database/sql"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
+	"time"
+
+	"github.com/lib/pq"
 )
 
 type RankingStore struct {
@@ -15,9 +20,16 @@ type RankingStore struct {
 }
 
 func NewRankingStore(db *sql.DB) *RankingStore {
+	if db != nil {
+		_, _ = db.Exec("ALTER TABLE rankings ADD COLUMN IF NOT EXISTS rank INT DEFAULT 0")
+	}
 	return &RankingStore{
 		db: db,
 	}
+}
+
+func (s *RankingStore) InvalidateCache(contestID string) {
+	// Invalidate leaderboard cache if enabled
 }
 
 func (s *RankingStore) UpdateLeaderboardUser(ctx context.Context, contestID string, userID string, req *dto.UpdateLeaderboardUserRequest) error {
@@ -96,7 +108,7 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 	totalPages := (totalCount + leaderboardPageSize - 1) / leaderboardPageSize
 
 	const entriesQ = `
-		SELECT RANK() OVER (ORDER BY r.score DESC) AS rank, r.user_id, u.name,u.usn,r.score
+		SELECT COALESCE(NULLIF(r.rank, 0), RANK() OVER (ORDER BY r.score DESC)) AS rank, r.user_id, u.name,u.usn,r.score
 		FROM rankings r
 		INNER JOIN users u 
 		ON r.user_id = u.id
@@ -240,4 +252,362 @@ func (s *RankingStore) getProblemScores(ctx context.Context, contestID string, u
 	}
 
 	return result, nil
+}
+
+type participantSummary struct {
+	UserID             string
+	TotalScore         int
+	ProblemsSolved     int
+	LastSubmissionTime int64
+	TotalAttempts      int
+	Rank               int
+	Hidden             bool
+	Disqualified       bool
+	Shortlisted        bool
+}
+
+func isTied(a, b participantSummary) bool {
+	return a.TotalScore == b.TotalScore &&
+		a.ProblemsSolved == b.ProblemsSolved &&
+		a.LastSubmissionTime == b.LastSubmissionTime &&
+		a.TotalAttempts == b.TotalAttempts
+}
+
+func (s *RankingStore) ConsolidateContest(ctx context.Context, contestID string, regradeMCQs bool) (*dto.ConsolidationResponse, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("ranking store: db is not initialized")
+	}
+
+	const checkContestQ = `SELECT EXISTS(SELECT 1 FROM contests WHERE id = $1)`
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, checkContestQ, contestID).Scan(&exists); err != nil {
+		return nil, fmt.Errorf("check contest: %w", err)
+	}
+	if !exists {
+		return nil, common.ContestNotFoundError
+	}
+
+	_, _ = s.db.ExecContext(ctx, `ALTER TABLE rankings ADD COLUMN IF NOT EXISTS rank INT DEFAULT 0`)
+
+	mcqsGraded, err := s.gradeContestMCQs(ctx, contestID, regradeMCQs)
+	if err != nil {
+		return nil, fmt.Errorf("grade MCQs: %w", err)
+	}
+
+	rankedCount, err := s.computeAndSaveRanks(ctx, contestID)
+	if err != nil {
+		return nil, fmt.Errorf("compute and save ranks: %w", err)
+	}
+
+	s.InvalidateCache(contestID)
+
+	return &dto.ConsolidationResponse{
+		ContestID:          contestID,
+		MCQsGraded:         mcqsGraded,
+		ParticipantsRanked: rankedCount,
+		ProcessedAt:        time.Now().Unix(),
+		Status:             "success",
+	}, nil
+}
+
+func (s *RankingStore) gradeContestMCQs(ctx context.Context, contestID string, regrade bool) (int, error) {
+	query := `
+		SELECT sub.id, sub.choices, p.answer
+		FROM submissions sub
+		INNER JOIN problems p ON p.id = sub.problem_id AND p.contest_id = sub.contest_id
+		WHERE sub.contest_id = $1 AND sub.type = 'mcq' AND p.type = 'mcq'
+	`
+	if !regrade {
+		query += ` AND sub.status = 'pending'`
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, contestID)
+	if err != nil {
+		return 0, fmt.Errorf("query MCQ submissions: %w", err)
+	}
+	defer rows.Close()
+
+	type mcqGradingResult struct {
+		id     string
+		status models.SubmissionStatus
+	}
+
+	var results []mcqGradingResult
+	for rows.Next() {
+		var id string
+		var choices, answer pq.Int64Array
+		if err := rows.Scan(&id, &choices, &answer); err != nil {
+			return 0, fmt.Errorf("scan MCQ submission: %w", err)
+		}
+		status := models.WrongAnswer
+		if mcqAnswersMatch(choices, answer) {
+			status = models.Accepted
+		}
+		results = append(results, mcqGradingResult{id: id, status: status})
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("MCQ iteration error: %w", err)
+	}
+
+	if len(results) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin MCQ update tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `UPDATE submissions SET status = $2 WHERE id = $1`)
+	if err != nil {
+		return 0, fmt.Errorf("prepare MCQ status update: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, res := range results {
+		if _, err := stmt.ExecContext(ctx, res.id, res.status); err != nil {
+			return 0, fmt.Errorf("update submission %s: %w", res.id, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit MCQ grading: %w", err)
+	}
+
+	return len(results), nil
+}
+
+func (s *RankingStore) computeAndSaveRanks(ctx context.Context, contestID string) (int, error) {
+	const problemsQ = `SELECT id, score FROM problems WHERE contest_id = $1`
+	pRows, err := s.db.QueryContext(ctx, problemsQ, contestID)
+	if err != nil {
+		return 0, fmt.Errorf("query problems: %w", err)
+	}
+	defer pRows.Close()
+
+	problemScores := make(map[string]int)
+	for pRows.Next() {
+		var pid string
+		var pscore int
+		if err := pRows.Scan(&pid, &pscore); err != nil {
+			return 0, fmt.Errorf("scan problem: %w", err)
+		}
+		problemScores[pid] = pscore
+	}
+	if err := pRows.Err(); err != nil {
+		return 0, fmt.Errorf("problems iteration: %w", err)
+	}
+
+
+	participantSet := make(map[string]bool)
+
+	regRows, err := s.db.QueryContext(ctx, `SELECT user_id FROM contest_registrations WHERE contest_id = $1`, contestID)
+	if err == nil {
+		for regRows.Next() {
+			var uid string
+			if err := regRows.Scan(&uid); err == nil {
+				participantSet[uid] = true
+			}
+		}
+		regRows.Close()
+	}
+
+	subUserRows, err := s.db.QueryContext(ctx, `SELECT DISTINCT user_id FROM submissions WHERE contest_id = $1`, contestID)
+	if err != nil {
+		return 0, fmt.Errorf("query submission users: %w", err)
+	}
+	for subUserRows.Next() {
+		var uid string
+		if err := subUserRows.Scan(&uid); err == nil {
+			participantSet[uid] = true
+		}
+	}
+	subUserRows.Close()
+
+	rankUserRows, err := s.db.QueryContext(ctx, `SELECT user_id FROM rankings WHERE contest_id = $1`, contestID)
+	if err == nil {
+		for rankUserRows.Next() {
+			var uid string
+			if err := rankUserRows.Scan(&uid); err == nil {
+				participantSet[uid] = true
+			}
+		}
+		rankUserRows.Close()
+	}
+
+	if len(participantSet) == 0 {
+		return 0, nil
+	}
+
+	const submissionsQ = `
+		SELECT user_id, problem_id, status, created_at
+		FROM submissions
+		WHERE contest_id = $1
+		ORDER BY created_at ASC
+	`
+	sRows, err := s.db.QueryContext(ctx, submissionsQ, contestID)
+	if err != nil {
+		return 0, fmt.Errorf("query contest submissions: %w", err)
+	}
+	defer sRows.Close()
+
+	type userSolveData struct {
+		earliestAccepted map[string]int64 
+		totalAttempts    int
+	}
+
+	userStats := make(map[string]*userSolveData)
+	for uid := range participantSet {
+		userStats[uid] = &userSolveData{
+			earliestAccepted: make(map[string]int64),
+		}
+	}
+
+	for sRows.Next() {
+		var uid, pid, status string
+		var createdAt int64
+		if err := sRows.Scan(&uid, &pid, &status, &createdAt); err != nil {
+			return 0, fmt.Errorf("scan submission: %w", err)
+		}
+		data, ok := userStats[uid]
+		if !ok {
+			data = &userSolveData{earliestAccepted: make(map[string]int64)}
+			userStats[uid] = data
+			participantSet[uid] = true
+		}
+		data.totalAttempts++
+		if status == string(models.Accepted) {
+			if prev, exists := data.earliestAccepted[pid]; !exists || createdAt < prev {
+				data.earliestAccepted[pid] = createdAt
+			}
+		}
+	}
+	if err := sRows.Err(); err != nil {
+		return 0, fmt.Errorf("submissions iteration: %w", err)
+	}
+
+	existingFlags := make(map[string]struct {
+		hidden       bool
+		disqualified bool
+		shortlisted  bool
+	})
+	flagRows, err := s.db.QueryContext(ctx, `SELECT user_id, hidden, disqualified, shortlisted FROM rankings WHERE contest_id = $1`, contestID)
+	if err == nil {
+		for flagRows.Next() {
+			var uid string
+			var h, d, s bool
+			if err := flagRows.Scan(&uid, &h, &d, &s); err == nil {
+				existingFlags[uid] = struct {
+					hidden       bool
+					disqualified bool
+					shortlisted  bool
+				}{h, d, s}
+			}
+		}
+		flagRows.Close()
+	}
+
+	participants := make([]participantSummary, 0, len(participantSet))
+	for uid := range participantSet {
+		data := userStats[uid]
+		score := 0
+		solvedCount := 0
+		var maxSolveTime int64
+
+		for pid, solveTime := range data.earliestAccepted {
+			if pts, ok := problemScores[pid]; ok {
+				score += pts
+				solvedCount++
+				if solveTime > maxSolveTime {
+					maxSolveTime = solveTime
+				}
+			}
+		}
+
+		flags := existingFlags[uid]
+		participants = append(participants, participantSummary{
+			UserID:             uid,
+			TotalScore:         score,
+			ProblemsSolved:     solvedCount,
+			LastSubmissionTime: maxSolveTime,
+			TotalAttempts:      data.totalAttempts,
+			Hidden:             flags.hidden,
+			Disqualified:       flags.disqualified,
+			Shortlisted:        flags.shortlisted,
+		})
+	}
+
+	sort.SliceStable(participants, func(i, j int) bool {
+		a, b := participants[i], participants[j]
+		if a.Disqualified != b.Disqualified {
+			return !a.Disqualified && b.Disqualified
+		}
+		if a.TotalScore != b.TotalScore {
+			return a.TotalScore > b.TotalScore
+		}
+		if a.ProblemsSolved != b.ProblemsSolved {
+			return a.ProblemsSolved > b.ProblemsSolved
+		}
+		if (a.ProblemsSolved > 0) != (b.ProblemsSolved > 0) {
+			return a.ProblemsSolved > 0
+		}
+		if a.LastSubmissionTime != b.LastSubmissionTime {
+			return a.LastSubmissionTime < b.LastSubmissionTime
+		}
+		if a.TotalAttempts != b.TotalAttempts {
+			return a.TotalAttempts < b.TotalAttempts
+		}
+		return a.UserID < b.UserID
+	})
+
+	for i := range participants {
+		if participants[i].Disqualified {
+			participants[i].Rank = 0
+			continue
+		}
+		if i > 0 && !participants[i-1].Disqualified && isTied(participants[i], participants[i-1]) {
+			participants[i].Rank = participants[i-1].Rank
+		} else {
+			participants[i].Rank = i + 1
+		}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	const upsertRankQ = `
+		INSERT INTO rankings (contest_id, user_id, score, rank, hidden, disqualified, shortlisted)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (contest_id, user_id)
+		DO UPDATE SET 
+			score = EXCLUDED.score,
+			rank = EXCLUDED.rank,
+			hidden = rankings.hidden,
+			disqualified = rankings.disqualified,
+			shortlisted = rankings.shortlisted
+	`
+
+	stmt, err := tx.PrepareContext(ctx, upsertRankQ)
+	if err != nil {
+		return 0, fmt.Errorf("prepare upsert: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, p := range participants {
+		if _, err := stmt.ExecContext(ctx, contestID, p.UserID, p.TotalScore, p.Rank, p.Hidden, p.Disqualified, p.Shortlisted); err != nil {
+			return 0, fmt.Errorf("upsert ranking for user %s: %w", p.UserID, err)
+		}
+	}
+
+	_, _ = tx.ExecContext(ctx, `REFRESH MATERIALIZED VIEW ranking_mv`)
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit rankings: %w", err)
+	}
+
+	return len(participants), nil
 }

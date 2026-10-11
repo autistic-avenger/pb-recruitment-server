@@ -75,3 +75,61 @@ func TestProblemEditWindow(t *testing.T) {
 		})
 	}
 }
+
+type serviceRankingTestStore struct {
+	consolidateFunc func(ctx context.Context, contestID string, regrade bool) (*dto.ConsolidationResponse, error)
+	updateFunc      func(ctx context.Context, contestID, userID string, req *dto.UpdateLeaderboardUserRequest) error
+	leaderboardFunc func(ctx context.Context, contestID string, page int) (*dto.GetLeaderboardResponse, error)
+}
+
+func (s serviceRankingTestStore) ConsolidateContest(ctx context.Context, contestID string, regrade bool) (*dto.ConsolidationResponse, error) {
+	if s.consolidateFunc != nil {
+		return s.consolidateFunc(ctx, contestID, regrade)
+	}
+	return nil, nil
+}
+
+func (s serviceRankingTestStore) UpdateLeaderboardUser(ctx context.Context, contestID, userID string, req *dto.UpdateLeaderboardUserRequest) error {
+	if s.updateFunc != nil {
+		return s.updateFunc(ctx, contestID, userID, req)
+	}
+	return nil
+}
+
+func (s serviceRankingTestStore) GetLeaderboard(ctx context.Context, contestID string, page int) (*dto.GetLeaderboardResponse, error) {
+	if s.leaderboardFunc != nil {
+		return s.leaderboardFunc(ctx, contestID, page)
+	}
+	return nil, nil
+}
+
+func TestConsolidateContestService(t *testing.T) {
+	t.Run("nil ranking store error", func(t *testing.T) {
+		svc := NewContestService(&stores.Storage{}, nil)
+		_, err := svc.ConsolidateContest(context.Background(), "c1", false)
+		if err == nil {
+			t.Fatal("expected error with nil ranking store")
+		}
+	})
+
+	t.Run("delegates to ranking store", func(t *testing.T) {
+		called := false
+		rankStore := serviceRankingTestStore{
+			consolidateFunc: func(_ context.Context, cid string, regrade bool) (*dto.ConsolidationResponse, error) {
+				called = true
+				if cid != "c123" || !regrade {
+					t.Errorf("unexpected args: cid=%s, regrade=%v", cid, regrade)
+				}
+				return &dto.ConsolidationResponse{ContestID: cid, Status: "success"}, nil
+			},
+		}
+		svc := NewContestService(&stores.Storage{Rankings: rankStore}, nil)
+		res, err := svc.ConsolidateContest(context.Background(), "c123", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !called || res == nil || res.Status != "success" {
+			t.Errorf("unexpected result: called=%v, res=%+v", called, res)
+		}
+	})
+}

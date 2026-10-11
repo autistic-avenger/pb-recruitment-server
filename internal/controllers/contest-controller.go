@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/gommon/log"
@@ -806,4 +807,50 @@ func (cc *ContestController) GetLeaderboard(ctx echo.Context) error {
 	ctx.Response().Header().Set("X-Current-Page", strconv.Itoa(leaderboard.Page))
 
 	return ctx.JSON(http.StatusOK, leaderboard.Entries)
+}
+
+// HandleConsolidateContest godoc
+// @Summary      Consolidate contest rankings (Admin)
+// @Description  Grade MCQs, combine with coding results, compute and save ranks at contest end
+// @Tags         Admin - Leaderboard
+// @Produce      json
+// @Security     BearerAuth
+// @Param        id path string false "Contest ID"
+// @Param        contestid path string false "Contest ID"
+// @Param        regrade query bool false "Re-grade already graded MCQs"
+// @Success      200 {object} dto.ConsolidationResponse
+// @Failure      400 {object} map[string]string "Contest ID is required"
+// @Failure      401 {object} map[string]string "Unauthorized"
+// @Failure      403 {object} map[string]string "Forbidden - Admin access required"
+// @Failure      404 {object} map[string]string "Contest not found"
+// @Failure      500 {object} map[string]string "Internal server error"
+// @Router       /admin/contest/{id}/consolidate [post]
+func (cc *ContestController) HandleConsolidateContest(ctx echo.Context) error {
+	contestID := ctx.Param("id")
+	if contestID == "" {
+		contestID = ctx.Param("contestid")
+	}
+	if contestID == "" {
+		return ctx.JSON(http.StatusBadRequest, map[string]string{
+			"error": "contest ID is required",
+		})
+	}
+
+	regradeStr := ctx.QueryParam("regrade")
+	regrade := strings.EqualFold(regradeStr, "true") || regradeStr == "1"
+
+	res, err := cc.contestService.ConsolidateContest(ctx.Request().Context(), contestID, regrade)
+	if err != nil {
+		if errors.Is(err, common.ContestNotFoundError) {
+			return ctx.JSON(http.StatusNotFound, map[string]string{
+				"error": common.ContestNotFoundError.Error(),
+			})
+		}
+		log.Errorf("failed to consolidate contest %s: %v", contestID, err)
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "failed to consolidate contest rankings",
+		})
+	}
+
+	return ctx.JSON(http.StatusOK, res)
 }

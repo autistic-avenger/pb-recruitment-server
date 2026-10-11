@@ -48,6 +48,7 @@ type Storage struct {
 	Rankings interface {
 		UpdateLeaderboardUser(ctx context.Context, contestID string, userID string, req *dto.UpdateLeaderboardUserRequest) error
 		GetLeaderboard(ctx context.Context, contestID string, page int) (*dto.GetLeaderboardResponse, error)
+		ConsolidateContest(ctx context.Context, contestID string, regradeMCQs bool) (*dto.ConsolidationResponse, error)
 	}
 	Problems interface {
 		CreateProblem(ctx context.Context, p *models.Problem) error
