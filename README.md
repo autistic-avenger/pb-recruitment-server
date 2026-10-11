@@ -45,9 +45,35 @@ Correcting a started contest requires controlled regrading and score reconciliat
 
 ## PostgreSQL tests
 
-Use a disposable database with migrations through `000024` applied. The test creates
-and cleans up its own rows. It skips when `TEST_DATABASE_URL` is unset.
+Use a disposable PostgreSQL 12+ database. The tests create isolated schemas, apply
+all migrations through `000026`, and clean up afterward. They skip when
+`TEST_DATABASE_URL` is unset.
 
 ```bash
-TEST_DATABASE_URL='postgres://user:password@localhost/test_db' go test ./internal/stores -run TestJudgeMCQPostgres -count=1
+TEST_DATABASE_URL='postgres://user:password@localhost/test_db' go test -race ./internal/stores -count=1
 ```
+
+## Judge0 deployment
+
+- Apply migrations through `000026` before deploying this build; use PostgreSQL 12+.
+- Set `JUDGE0_URL` and `JUDGE0_AUTH_TOKEN`. Keep the Judge0 API inaccessible to contestants.
+- Enable callbacks with `JUDGE0_CALLBACK_BASE_URL` and the same `JUDGE0_CALLBACK_SECRET`
+  on every backend replica. Verify a signed callback reaches the backend from Judge0.
+- With Vivek, load-test queue capacity for 500–600 contestants. The instance checked
+  on 11 October has `max_queue_size=100` and `max_memory_limit=512000` KB; our default
+  256 MiB is 262144 KB. Raising the queue limit also requires enough workers.
+- Recovery fetches results in batches respecting `JUDGE0_BATCH_SIZE` and continues
+  across pages within the existing 30-second sweep budget. Abandoned jobs
+  are failed only after two valid idle `/workers` observations at least 15 seconds
+  apart; candidates must predate the first observation by 30 seconds. Busy queues,
+  unavailable statistics, empty queue lists, and queues without workers do not
+  trigger failure cleanup. Verify `/workers` reports the execution queue with the
+  configured credentials. A permanently unavailable observation endpoint needs
+  operator attention; it does not justify discarding potentially valid results.
+- Keep callback signatures out of proxy and load-balancer logs as well as application
+  logs. The signature is in the callback URL query string.
+
+Verdicts map status 6 to compilation error and 13/14 to `judge_error`. Judge0 has no
+dedicated memory-limit verdict. Submission runtime is the sum of testcase runtimes;
+memory is the maximum. Scores come from solved problems; freeze problem scores
+before starting and use controlled reconciliation for manual database adjustments.

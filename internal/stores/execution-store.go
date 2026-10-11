@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -16,7 +15,10 @@ type FinalExecutionResult struct {
 	ExecutionID, Token, Status string
 	Runtime, Memory            int64
 }
-type executionChild struct{ id, status string }
+type executionChild struct {
+	id, status    string
+	testCaseIndex int
+}
 
 type ExecutionStore struct {
 	db *sql.DB
@@ -79,18 +81,6 @@ func (s *ExecutionStore) SaveTokens(ctx context.Context, tokens map[string]strin
 		ids = append(ids, id)
 		values = append(values, token)
 	}
-	order := make([]int, len(ids))
-	for i := range order {
-		order[i] = i
-	}
-	sort.Slice(order, func(i, j int) bool { return ids[order[i]] < ids[order[j]] })
-	sortedIDs := make([]string, len(ids))
-	sortedValues := make([]string, len(values))
-	for i, j := range order {
-		sortedIDs[i] = ids[j]
-		sortedValues[i] = values[j]
-	}
-	ids, values = sortedIDs, sortedValues
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -121,21 +111,33 @@ func (s *ExecutionStore) SaveTokens(ctx context.Context, tokens map[string]strin
 			return err
 		}
 	}
-	for i, id := range ids {
-		var status, token string
-		err = tx.QueryRowContext(ctx, `SELECT status, COALESCE(judge0_token,'') FROM submission_executions WHERE id=$1 FOR UPDATE`, id).Scan(&status, &token)
-		if err != nil {
+	rows, err = tx.QueryContext(ctx, `SELECT e.id::text,COALESCE(e.judge0_token,''),t.token FROM submission_executions e JOIN unnest($1::uuid[],$2::text[]) AS t(id,token) ON e.id=t.id ORDER BY e.id FOR UPDATE OF e`, pq.Array(ids), pq.Array(values))
+	if err != nil {
+		return err
+	}
+	found := 0
+	for rows.Next() {
+		var id, token, wanted string
+		if err = rows.Scan(&id, &token, &wanted); err != nil {
+			rows.Close()
 			return err
 		}
-		if token != "" && token != values[i] {
+		if token != "" && token != wanted {
+			rows.Close()
 			return fmt.Errorf("conflicting Judge0 token for execution %s", id)
 		}
-		if token == "" {
-			_, err = tx.ExecContext(ctx, `UPDATE submission_executions SET judge0_token=$2 WHERE id=$1`, id, values[i])
-			if err != nil {
-				return err
-			}
-		}
+		found++
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if found != len(ids) {
+		return sql.ErrNoRows
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE submission_executions e SET judge0_token=t.token FROM unnest($1::uuid[],$2::text[]) AS t(id,token) WHERE e.id=t.id AND e.judge0_token IS NULL`, pq.Array(ids), pq.Array(values)); err != nil {
+		return err
 	}
 	err = tx.Commit()
 	if err != nil {
@@ -186,14 +188,9 @@ func (s *ExecutionStore) MarkFailed(ctx context.Context, ids []string) error {
 			tx.Rollback()
 			return e
 		}
-		type child struct {
-			id            string
-			status        string
-			testCaseIndex int
-		}
-		var children []child
+		var children []executionChild
 		for execs.Next() {
-			var c child
+			var c executionChild
 			if e = execs.Scan(&c.id, &c.status, &c.testCaseIndex); e != nil {
 				execs.Close()
 				tx.Rollback()
@@ -207,7 +204,7 @@ func (s *ExecutionStore) MarkFailed(ctx context.Context, ids []string) error {
 			return e
 		}
 		execs.Close()
-		for _, c := range children {
+		for i, c := range children {
 			for _, id := range ids {
 				if c.id == id && c.status == "pending" {
 					res, e := tx.ExecContext(ctx, `UPDATE submission_executions SET status='judge_error',runtime=0,memory=0 WHERE id=$1 AND status='pending' AND judge0_token IS NULL`, id)
@@ -223,6 +220,7 @@ func (s *ExecutionStore) MarkFailed(ctx context.Context, ids []string) error {
 					}
 
 					if rowsAffected > 0 {
+						children[i].status = "judge_error"
 						_, e = tx.ExecContext(ctx, `INSERT INTO test_case_results(id,execution_id,submission_id,test_case_id,status,runtime,memory,created_at) VALUES($1,$1,$2,$3,'judge_error',0,0,$4) ON CONFLICT(execution_id) DO NOTHING`, id, parent, fmt.Sprint(c.testCaseIndex), time.Now().Unix())
 						if e != nil {
 							tx.Rollback()
@@ -240,15 +238,10 @@ func (s *ExecutionStore) MarkFailed(ctx context.Context, ids []string) error {
 				return e
 			}
 			if !pending {
-				_, e = tx.ExecContext(ctx, `UPDATE submissions s SET status=CASE
-					WHEN EXISTS(SELECT 1 FROM submission_executions WHERE submission_id=$1 AND status='failed_to_process') THEN 'failed_to_process'::submission_status
-					WHEN EXISTS(SELECT 1 FROM submission_executions WHERE submission_id=$1 AND status='wrong_answer') THEN 'wrong_answer'::submission_status
-					WHEN EXISTS(SELECT 1 FROM submission_executions WHERE submission_id=$1 AND status='tle') THEN 'tle'::submission_status
-					WHEN EXISTS(SELECT 1 FROM submission_executions WHERE submission_id=$1 AND status='rte') THEN 'rte'::submission_status
-					ELSE 'judge_error'::submission_status END,
+				_, e = tx.ExecContext(ctx, `UPDATE submissions s SET status=$2,
 					runtime=COALESCE((SELECT sum(runtime) FROM submission_executions WHERE submission_id=$1),0),
 					memory=COALESCE((SELECT max(memory) FROM submission_executions WHERE submission_id=$1),0)
-					WHERE s.id=$1 AND s.status='pending'`, parent)
+					WHERE s.id=$1 AND s.status='pending'`, parent, aggregateFailure(children))
 				if e != nil {
 					tx.Rollback()
 					return e
@@ -300,9 +293,6 @@ func (s *ExecutionStore) ProcessFinal(ctx context.Context, r FinalExecutionResul
 		return fmt.Errorf("conflicting Judge0 token")
 	}
 	alreadyTerminal := currentStatus != "pending"
-	if subStatus != "pending" {
-		return tx.Commit()
-	}
 	if alreadyTerminal {
 		r.Status = currentStatus
 		r.Runtime, r.Memory = storedRuntime, storedMemory
@@ -318,6 +308,11 @@ func (s *ExecutionStore) ProcessFinal(ctx context.Context, r FinalExecutionResul
 		if err != nil {
 			return err
 		}
+		for i := range children {
+			if children[i].id == r.ExecutionID {
+				children[i].status = r.Status
+			}
+		}
 	}
 	conflict := `ON CONFLICT(execution_id) DO UPDATE SET status=EXCLUDED.status,runtime=EXCLUDED.runtime,memory=EXCLUDED.memory`
 	if alreadyTerminal {
@@ -331,6 +326,9 @@ func (s *ExecutionStore) ProcessFinal(ctx context.Context, r FinalExecutionResul
 	_, err = tx.ExecContext(ctx, `INSERT INTO test_case_results(id,execution_id,submission_id,test_case_id,status,runtime,memory,created_at) VALUES($1,$1,$2,$3,$4,$5,$6,$7) `+conflict, r.ExecutionID, subID, fmt.Sprint(index), tcStatus, r.Runtime, r.Memory, time.Now().Unix())
 	if err != nil {
 		return err
+	}
+	if subStatus != "pending" {
+		return tx.Commit()
 	}
 	var pending, accepted bool
 	var totalRuntime, totalMemory int64
@@ -349,7 +347,7 @@ func (s *ExecutionStore) ProcessFinal(ctx context.Context, r FinalExecutionResul
 		if err != nil {
 			return err
 		}
-		verdict := aggregateFailure(children, r.ExecutionID, r.Status)
+		verdict := aggregateFailure(children)
 		if accepted {
 			verdict = "accepted"
 		}
@@ -376,41 +374,9 @@ func (s *ExecutionStore) ProcessFinal(ctx context.Context, r FinalExecutionResul
 	return tx.Commit()
 }
 
-func (s *ExecutionStore) BindToken(ctx context.Context, executionID, token string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var parent string
-	if err = tx.QueryRowContext(ctx, `SELECT submission_id FROM submission_executions WHERE id=$1`, executionID).Scan(&parent); err != nil {
-		return err
-	}
-	var ignored string
-	if err = tx.QueryRowContext(ctx, `SELECT id FROM submissions WHERE id=$1 FOR UPDATE`, parent).Scan(&ignored); err != nil {
-		return err
-	}
-	var existing string
-	if err = tx.QueryRowContext(ctx, `SELECT COALESCE(judge0_token,'') FROM submission_executions WHERE id=$1 FOR UPDATE`, executionID).Scan(&existing); err != nil {
-		return err
-	}
-	if existing != "" && existing != token {
-		return fmt.Errorf("conflicting Judge0 token")
-	}
-	if existing == "" {
-		if _, err = tx.ExecContext(ctx, `UPDATE submission_executions SET judge0_token=$2 WHERE id=$1`, executionID, token); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-func aggregateFailure(children []executionChild, changedID, changedStatus string) string {
+func aggregateFailure(children []executionChild) string {
 	// Precedence: compilation, wrong answer, time limit, runtime, judge error.
 	for _, want := range []string{"failed_to_process", "wrong_answer", "tle", "rte", "judge_error"} {
-		if changedID != "" && changedStatus == want {
-			return want
-		}
 		for _, c := range children {
 			if c.status == want {
 				return want
@@ -424,8 +390,9 @@ func (s *ExecutionStore) PendingWithTokens(ctx context.Context, limit int, curso
 	if cursorID == "" {
 		cursorID = uuid.Nil.String()
 	}
-	query := `SELECT id::text, judge0_token, created_at FROM submission_executions
+	query := `SELECT id::text, judge0_token, created_at FROM submission_executions e
               WHERE status='pending' AND judge0_token IS NOT NULL
+                AND EXISTS(SELECT 1 FROM submissions s WHERE s.id=e.submission_id AND s.status='pending')
                 AND created_at <= extract(epoch from now())::bigint - 30
                 AND (created_at, id) > ($2, $3)
               ORDER BY created_at, id LIMIT $1`
@@ -467,9 +434,8 @@ func (s *ExecutionStore) TerminalPendingParents(ctx context.Context, limit int) 
 	return out, rows.Err()
 }
 
-func (s *ExecutionStore) StaleTokenlessExecutions(ctx context.Context, olderThanSeconds int64, limit int) ([]string, error) {
-	cutoff := time.Now().Unix() - olderThanSeconds
-	rows, err := s.db.QueryContext(ctx, `SELECT id::text FROM submission_executions WHERE status='pending' AND judge0_token IS NULL AND created_at <= $1 ORDER BY created_at,id LIMIT $2`, cutoff, limit)
+func (s *ExecutionStore) PendingTokenlessBefore(ctx context.Context, cutoff int64, limit int) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id::text FROM submission_executions e WHERE status='pending' AND judge0_token IS NULL AND created_at < $1 AND EXISTS(SELECT 1 FROM submissions s WHERE s.id=e.submission_id AND s.status='pending') ORDER BY created_at,id LIMIT $2`, cutoff, limit)
 	if err != nil {
 		return nil, err
 	}

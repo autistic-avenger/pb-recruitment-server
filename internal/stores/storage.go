@@ -42,9 +42,8 @@ type Storage struct {
 		MarkFailed(ctx context.Context, ids []string) error
 		ProcessFinal(ctx context.Context, result FinalExecutionResult) error
 		PendingWithTokens(ctx context.Context, limit int, cursorTime int64, cursorID string) ([]models.Execution, error)
-		BindToken(ctx context.Context, executionID, token string) error
 		TerminalPendingParents(ctx context.Context, limit int) ([]FinalExecutionResult, error)
-		StaleTokenlessExecutions(ctx context.Context, olderThanSeconds int64, limit int) ([]string, error)
+		PendingTokenlessBefore(ctx context.Context, cutoff int64, limit int) ([]string, error)
 	}
 	Rankings interface {
 		UpdateLeaderboardUser(ctx context.Context, contestID string, userID string, req *dto.UpdateLeaderboardUserRequest) error

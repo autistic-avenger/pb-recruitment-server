@@ -7,9 +7,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -90,7 +93,7 @@ func (c *Client) VerifyCallback(id, signature string) bool {
 	return err == nil && gotErr == nil && hmac.Equal(want, got)
 }
 
-func (c *Client) batchSize() int {
+func (c *Client) BatchSize() int {
 	const defaultSize = 20
 	raw := os.Getenv("JUDGE0_BATCH_SIZE")
 	if raw == "" {
@@ -104,15 +107,19 @@ func (c *Client) batchSize() int {
 }
 
 func (c *Client) CreateBatch(ctx context.Context, jobs []SubmissionRequest) ([]SubmissionResult, error) {
-	if c.baseURL == "" {
-		return nil, fmt.Errorf("%w: JUDGE0_URL is not set", ErrUnavailable)
-	}
 	if len(jobs) == 0 {
 		return []SubmissionResult{}, nil
 	}
 
 	results := make([]SubmissionResult, len(jobs))
-	size := c.batchSize()
+	if c.baseURL == "" {
+		err := fmt.Errorf("%w: JUDGE0_URL is not set", ErrDispatchRejected)
+		for i := range results {
+			results[i].Error = err
+		}
+		return results, err
+	}
+	size := c.BatchSize()
 
 	for start := 0; start < len(jobs); start += size {
 		end := start + size
@@ -137,11 +144,15 @@ func (c *Client) CreateBatch(ctx context.Context, jobs []SubmissionRequest) ([]S
 	return results, nil
 }
 
-func (c *Client) GetSubmission(ctx context.Context, token string) (*SubmissionStatusResponse, error) {
+func (c *Client) GetSubmissions(ctx context.Context, tokens []string) ([]*SubmissionStatusResponse, error) {
+	if len(tokens) == 0 {
+		return nil, nil
+	}
 	if c.baseURL == "" {
 		return nil, fmt.Errorf("%w: JUDGE0_URL is not set", ErrUnavailable)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/submissions/"+token+"?base64_encoded=false&fields=token,time,memory,status", nil)
+	query := url.Values{"tokens": {strings.Join(tokens, ",")}, "base64_encoded": {"false"}, "fields": {"token,time,memory,status"}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/submissions/batch?"+query.Encode(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -154,16 +165,61 @@ func (c *Client) GetSubmission(ctx context.Context, token string) (*SubmissionSt
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusNotFound {
-			return nil, ErrSubmissionNotFound
-		}
 		return nil, fmt.Errorf("%w: status %d", ErrUnavailable, resp.StatusCode)
 	}
-	var out SubmissionStatusResponse
+	var out struct {
+		Submissions []*SubmissionStatusResponse `json:"submissions"`
+	}
 	if err = json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
 	}
-	return &out, nil
+	if len(out.Submissions) != len(tokens) {
+		return nil, ErrInvalidResponse
+	}
+	for i, result := range out.Submissions {
+		if result != nil && (result.Token != tokens[i] || result.Status.ID < 1 || result.Status.ID > 14) {
+			return nil, ErrInvalidResponse
+		}
+	}
+	return out.Submissions, nil
+}
+
+func (c *Client) WorkersIdle(ctx context.Context) (bool, error) {
+	if c.baseURL == "" {
+		return false, ErrUnavailable
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/workers", nil)
+	if err != nil {
+		return false, err
+	}
+	if c.authToken != "" {
+		req.Header.Set("X-Auth-Token", c.authToken)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, ErrUnavailable
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("%w: workers status %d", ErrUnavailable, resp.StatusCode)
+	}
+	var queues []struct {
+		Queue     string `json:"queue"`
+		Size      *int   `json:"size"`
+		Working   *int   `json:"working"`
+		Available *int   `json:"available"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&queues); err != nil || len(queues) == 0 {
+		return false, ErrInvalidResponse
+	}
+	idle := true
+	for _, queue := range queues {
+		if queue.Queue == "" || queue.Size == nil || queue.Working == nil || queue.Available == nil || *queue.Size < 0 || *queue.Working < 0 || *queue.Available < *queue.Working {
+			return false, ErrInvalidResponse
+		}
+		idle = idle && *queue.Size == 0 && *queue.Working == 0 && *queue.Available > 0
+	}
+	return idle, nil
 }
 
 func (c *Client) postBatch(ctx context.Context, jobs []SubmissionRequest) ([]SubmissionResult, error) {
@@ -176,7 +232,7 @@ func (c *Client) postBatch(ctx context.Context, jobs []SubmissionRequest) ([]Sub
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/submissions/batch?base64_encoded=false", bytes.NewReader(payload))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: invalid Judge0 URL", ErrDispatchRejected)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.authToken != "" {
@@ -185,6 +241,10 @@ func (c *Client) postBatch(ctx context.Context, jobs []SubmissionRequest) ([]Sub
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		var dialErr *net.OpError
+		if errors.As(err, &dialErr) && dialErr.Op == "dial" {
+			return nil, fmt.Errorf("%w: %v", ErrDispatchRejected, err)
+		}
 		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	defer resp.Body.Close()

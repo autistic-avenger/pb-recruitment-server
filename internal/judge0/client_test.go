@@ -62,7 +62,7 @@ func TestURLTrailingSlashes(t *testing.T) {
 					w.WriteHeader(http.StatusCreated)
 					w.Write([]byte(`[{"token":"accepted"}]`))
 				} else {
-					w.Write([]byte(`{"token":"accepted","status":{"id":3}}`))
+					w.Write([]byte(`{"submissions":[{"token":"accepted","status":{"id":3}}]}`))
 				}
 			}))
 			defer server.Close()
@@ -81,7 +81,7 @@ func TestURLTrailingSlashes(t *testing.T) {
 			if _, err := client.CreateBatch(context.Background(), []SubmissionRequest{{}}); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := client.GetSubmission(context.Background(), "accepted"); err != nil {
+			if _, err := client.GetSubmissions(context.Background(), []string{"accepted"}); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -103,6 +103,39 @@ func TestBatchBodyReadFailureIsAmbiguous(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].Token != "" || !errors.Is(results[0].Error, ErrUnavailable) {
 		t.Fatalf("ambiguous result = %+v", results)
+	}
+}
+
+func TestBatchResultValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		invalid    bool
+	}{
+		{"mixed found and missing", `{"submissions":[{"token":"a","status":{"id":3}},null]}`, false},
+		{"missing entries", `{"submissions":[]}`, true},
+		{"wrong token", `{"submissions":[{"token":"other","status":{"id":3}},null]}`, true},
+		{"invalid status", `{"submissions":[{"token":"a","status":{"id":0}},null]}`, true},
+		{"malformed body", `{`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/submissions/batch" || r.URL.Query().Get("tokens") != "a,b" || r.Header.Get("X-Auth-Token") != "test-token" {
+					t.Error("invalid batch request or authentication")
+				}
+				w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			t.Setenv("JUDGE0_URL", server.URL)
+			t.Setenv("JUDGE0_AUTH_TOKEN", "test-token")
+			results, err := NewClient().GetSubmissions(context.Background(), []string{"a", "b"})
+			if tc.invalid {
+				if !errors.Is(err, ErrInvalidResponse) {
+					t.Fatalf("invalid response error = %v", err)
+				}
+			} else if err != nil || len(results) != 2 || results[0] == nil || results[1] != nil {
+				t.Fatalf("results = %+v, err = %v", results, err)
+			}
+		})
 	}
 }
 

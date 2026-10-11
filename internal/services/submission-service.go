@@ -27,6 +27,7 @@ type SubmissionService struct {
 	judge0             *judge0.Client
 	recoveryCursorTime int64
 	recoveryCursorID   string
+	recoveryIdleSince  time.Time
 	cursorMu           sync.Mutex
 }
 
@@ -218,7 +219,7 @@ func (ss *SubmissionService) HandleJudge0Callback(ctx context.Context, execution
 		if payload.Token == "" {
 			return fmt.Errorf("missing Judge0 token")
 		}
-		return ss.stores.Executions.BindToken(ctx, executionID, payload.Token)
+		return ss.stores.Executions.SaveTokens(ctx, map[string]string{executionID: payload.Token})
 	}
 	runtime, err := judgeRuntimeMillis(payload.Time)
 	if err != nil {
@@ -292,13 +293,31 @@ func (ss *SubmissionService) RecoverJudge0(ctx context.Context) {
 		}
 	}
 
-	// shortcut: allow ten minutes for queued callbacks; revisit after contest-load testing.
-	staleIDs, err := ss.stores.Executions.StaleTokenlessExecutions(ctx, 600, 50)
-	if err != nil {
-		log.Errorf("judge0 recovery list stale tokenless failed: %v", err)
-	} else if len(staleIDs) > 0 {
-		if err := ss.stores.Executions.MarkFailed(ctx, staleIDs); err != nil {
-			log.Errorf("judge0 recovery cleanup stale tokenless failed: %v", err)
+	observedAt := time.Now()
+	workerCtx, cancelWorkers := context.WithTimeout(ctx, ss.judge0.Timeout())
+	idle, workerErr := ss.judge0.WorkersIdle(workerCtx)
+	cancelWorkers()
+	cutoff := int64(0)
+	if workerErr != nil || !idle {
+		ss.recoveryIdleSince = time.Time{}
+		if workerErr != nil {
+			log.Errorf("judge0 recovery worker observation failed: %v", workerErr)
+		}
+	} else if ss.recoveryIdleSince.IsZero() {
+		ss.recoveryIdleSince = observedAt
+	} else if observedAt.Sub(ss.recoveryIdleSince) >= 15*time.Second {
+		// shortcut: two idle sweeps plus a dispatch margin; revisit if Judge0 adds delayed retries.
+		cutoff = ss.recoveryIdleSince.Unix() - 30
+		ss.recoveryIdleSince = observedAt
+	}
+	if cutoff > 0 {
+		staleIDs, err := ss.stores.Executions.PendingTokenlessBefore(ctx, cutoff, 50)
+		if err != nil {
+			log.Errorf("judge0 recovery list abandoned tokenless failed: %v", err)
+		} else if len(staleIDs) > 0 {
+			if err := ss.stores.Executions.MarkFailed(ctx, staleIDs); err != nil {
+				log.Errorf("judge0 recovery cleanup abandoned tokenless failed: %v", err)
+			}
 		}
 	}
 
@@ -316,48 +335,62 @@ func (ss *SubmissionService) RecoverJudge0(ctx context.Context) {
 		}
 	}
 
-	items, err := ss.stores.Executions.PendingWithTokens(ctx, 50, ss.recoveryCursorTime, ss.recoveryCursorID)
-	if err != nil {
-		log.Errorf("judge0 recovery list failed: %v", err)
-		return
-	}
-
-	if len(items) == 0 {
-		ss.recoveryCursorTime = 0
-		ss.recoveryCursorID = ""
-		return
-	}
-
-	for _, item := range items {
-		if ctx.Err() != nil {
-			log.Warnf("judge0 recovery context timeout, breaking early")
-			break
+	for ctx.Err() == nil {
+		items, err := ss.stores.Executions.PendingWithTokens(ctx, 50, ss.recoveryCursorTime, ss.recoveryCursorID)
+		if err != nil {
+			log.Errorf("judge0 recovery list failed: %v", err)
+			return
 		}
-		callCtx, cancel := context.WithTimeout(ctx, ss.judge0.Timeout())
-		result, e := ss.judge0.GetSubmission(callCtx, item.Judge0Token)
-		cancel()
-		// Advance only past attempted jobs so a timeout cannot skip the rest of the page.
-		ss.recoveryCursorTime, ss.recoveryCursorID = item.CreatedAt, item.ID
-		if errors.Is(e, judge0.ErrSubmissionNotFound) {
-			if e = ss.stores.Executions.ProcessFinal(ctx, stores.FinalExecutionResult{ExecutionID: item.ID, Token: item.Judge0Token, Status: "judge_error"}); e != nil {
-				log.Errorf("judge0 recovery missing token finalization failed: %v", e)
+
+		if len(items) == 0 {
+			ss.recoveryCursorTime = 0
+			ss.recoveryCursorID = ""
+			return
+		}
+
+		for start := 0; start < len(items); start += ss.judge0.BatchSize() {
+			if ctx.Err() != nil {
+				log.Warnf("judge0 recovery context timeout, breaking early")
+				break
 			}
-			continue
-		}
-		if e != nil || result == nil {
-			continue
-		}
-		_, final := mapJudgeStatus(result.Status.ID)
-		if !final {
-			continue
-		}
-		payload := judge0.CallbackResult{Token: result.Token, Time: result.Time, Memory: result.Memory}
-		payload.Status.ID = result.Status.ID
-		if payload.Token == "" {
-			payload.Token = item.Judge0Token
-		}
-		if e = ss.HandleJudge0Callback(ctx, item.ID, payload); e != nil {
-			log.Errorf("judge0 recovery result failed: %v", e)
+			callCtx, cancel := context.WithTimeout(ctx, ss.judge0.Timeout())
+			end := min(start+ss.judge0.BatchSize(), len(items))
+			page := items[start:end]
+			tokens := make([]string, len(page))
+			for i, item := range page {
+				tokens[i] = item.Judge0Token
+			}
+			results, e := ss.judge0.GetSubmissions(callCtx, tokens)
+			cancel()
+			if e != nil {
+				// Failed batches advance so unavailable tokens cannot starve later jobs.
+				last := page[len(page)-1]
+				ss.recoveryCursorTime, ss.recoveryCursorID = last.CreatedAt, last.ID
+				log.Errorf("judge0 recovery result fetch failed: %v", e)
+				continue
+			}
+			for i, item := range page {
+				if ctx.Err() != nil {
+					return
+				}
+				ss.recoveryCursorTime, ss.recoveryCursorID = item.CreatedAt, item.ID
+				result := results[i]
+				if result == nil || (cutoff > 0 && item.CreatedAt < cutoff && result.Status.ID <= 2) {
+					if e = ss.stores.Executions.ProcessFinal(ctx, stores.FinalExecutionResult{ExecutionID: item.ID, Token: item.Judge0Token, Status: "judge_error"}); e != nil {
+						log.Errorf("judge0 recovery abandoned job finalization failed: %v", e)
+					}
+					continue
+				}
+				_, final := mapJudgeStatus(result.Status.ID)
+				if !final {
+					continue
+				}
+				payload := judge0.CallbackResult{Token: result.Token, Time: result.Time, Memory: result.Memory}
+				payload.Status.ID = result.Status.ID
+				if e = ss.HandleJudge0Callback(ctx, item.ID, payload); e != nil {
+					log.Errorf("judge0 recovery result failed: %v", e)
+				}
+			}
 		}
 	}
 }

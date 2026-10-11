@@ -82,19 +82,21 @@ func (s executionTestStore) MarkFailed(ctx context.Context, ids []string) error 
 func TestCreateSubmissionFailureBookkeeping(t *testing.T) {
 	writeErr := errors.New("failure status write failed")
 	for _, tc := range []struct {
-		name             string
-		timeoutSave      bool
-		markErr          error
-		failUpload       bool
-		failInsert       bool
-		callbacksEnabled bool
-		networkFailure   bool
-		bodyFailure      bool
-		invalidBody      bool
-		missingTokens    bool
-		serverFailure    bool
-		queueFull        bool
-		validationError  bool
+		name              string
+		timeoutSave       bool
+		markErr           error
+		failUpload        bool
+		failInsert        bool
+		callbacksEnabled  bool
+		networkFailure    bool
+		bodyFailure       bool
+		invalidBody       bool
+		missingTokens     bool
+		serverFailure     bool
+		queueFull         bool
+		validationError   bool
+		refusedConnection bool
+		unsetURL          bool
 	}{
 		{name: "token save timeout", timeoutSave: true},
 		{name: "failure status write error", markErr: writeErr},
@@ -110,6 +112,8 @@ func TestCreateSubmissionFailureBookkeeping(t *testing.T) {
 		{name: "callbacks enabled server failure", callbacksEnabled: true, serverFailure: true},
 		{name: "callbacks enabled queue full", callbacksEnabled: true, queueFull: true},
 		{name: "callbacks enabled per-entry validation error", callbacksEnabled: true, validationError: true},
+		{name: "callbacks enabled connection refused", callbacksEnabled: true, refusedConnection: true},
+		{name: "callbacks enabled unset URL", callbacksEnabled: true, unsetURL: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			objects := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -194,6 +198,12 @@ func TestCreateSubmissionFailureBookkeeping(t *testing.T) {
 			}))
 			defer judge.Close()
 			t.Setenv("JUDGE0_URL", judge.URL)
+			if tc.refusedConnection {
+				judge.Close()
+			}
+			if tc.unsetURL {
+				t.Setenv("JUDGE0_URL", "")
+			}
 			t.Setenv("JUDGE0_AUTH_TOKEN", "")
 			t.Setenv("JUDGE0_CALLBACK_BASE_URL", "")
 			t.Setenv("JUDGE0_CALLBACK_SECRET", "")
