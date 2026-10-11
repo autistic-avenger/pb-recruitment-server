@@ -7,17 +7,81 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
+type leaderboardCacheEntry struct {
+	data      *dto.GetLeaderboardResponse
+	expiresAt time.Time
+}
+
 type RankingStore struct {
-	db *sql.DB
+	db       *sql.DB
+	cache    map[string]leaderboardCacheEntry
+	cacheMu  sync.RWMutex
+	cacheTTL time.Duration
 }
 
 func NewRankingStore(db *sql.DB) *RankingStore {
-	return &RankingStore{
-		db: db,
+	ttl := 3 * time.Second
+	if ttlStr := os.Getenv("LEADERBOARD_CACHE_TTL_SECONDS"); ttlStr != "" {
+		if sec, err := strconv.Atoi(ttlStr); err == nil && sec >= 0 {
+			ttl = time.Duration(sec) * time.Second
+		}
 	}
+	return &RankingStore{
+		db:       db,
+		cache:    make(map[string]leaderboardCacheEntry),
+		cacheTTL: ttl,
+	}
+}
+
+func (s *RankingStore) SetCacheTTL(d time.Duration) {
+	if s == nil {
+		return
+	}
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	s.cacheTTL = d
+}
+
+func (s *RankingStore) InvalidateCache(contestID string) {
+	if s == nil {
+		return
+	}
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	if contestID == "" {
+		s.cache = make(map[string]leaderboardCacheEntry)
+		return
+	}
+	prefix := contestID + ":"
+	for k := range s.cache {
+		if strings.HasPrefix(k, prefix) {
+			delete(s.cache, k)
+		}
+	}
+}
+
+func cloneLeaderboardResponse(res *dto.GetLeaderboardResponse) *dto.GetLeaderboardResponse {
+	if res == nil {
+		return nil
+	}
+	clone := *res
+	clone.Entries = make([]dto.LeaderboardEntry, len(res.Entries))
+	for i, e := range res.Entries {
+		entryCopy := e
+		if e.ProblemScores != nil {
+			entryCopy.ProblemScores = make([]dto.ProblemScore, len(e.ProblemScores))
+			copy(entryCopy.ProblemScores, e.ProblemScores)
+		}
+		clone.Entries[i] = entryCopy
+	}
+	return &clone
 }
 
 func (s *RankingStore) UpdateLeaderboardUser(ctx context.Context, contestID string, userID string, req *dto.UpdateLeaderboardUserRequest) error {
@@ -55,6 +119,8 @@ func (s *RankingStore) UpdateLeaderboardUser(ctx context.Context, contestID stri
 		return fmt.Errorf("update ranking: %w", err)
 	}
 
+	s.InvalidateCache(contestID)
+
 	return nil
 }
 
@@ -63,6 +129,18 @@ const leaderboardPageSize = 20
 func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, page int) (*dto.GetLeaderboardResponse, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("ranking store: db is not initialized")
+	}
+
+	page = max(0, page)
+	cacheKey := fmt.Sprintf("%s:%d", contestID, page)
+
+	if s.cacheTTL > 0 {
+		s.cacheMu.RLock()
+		entry, ok := s.cache[cacheKey]
+		s.cacheMu.RUnlock()
+		if ok && time.Now().Before(entry.expiresAt) {
+			return cloneLeaderboardResponse(entry.data), nil
+		}
 	}
 
 	const checkContestQ = `SELECT EXISTS(SELECT 1 FROM contests WHERE id = $1)`
@@ -75,7 +153,6 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 		return nil, common.ContestNotFoundError
 	}
 
-	page = max(0, page)
 	offset := page * leaderboardPageSize
 
 	const countQ = `
@@ -146,12 +223,23 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 		entries[i].ProblemsSolved, entries[i].LastSubmissionTime = summarizeSolves(scores)
 	}
 
-	return &dto.GetLeaderboardResponse{
+	resp := &dto.GetLeaderboardResponse{
 		Entries:    entries,
 		Page:       page,
 		TotalPages: totalPages,
 		TotalCount: totalCount,
-	}, nil
+	}
+
+	if s.cacheTTL > 0 {
+		s.cacheMu.Lock()
+		s.cache[cacheKey] = leaderboardCacheEntry{
+			data:      resp,
+			expiresAt: time.Now().Add(s.cacheTTL),
+		}
+		s.cacheMu.Unlock()
+	}
+
+	return cloneLeaderboardResponse(resp), nil
 }
 
 // summarizeSolves reports how many problems the user solved and the time at

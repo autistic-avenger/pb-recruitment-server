@@ -117,3 +117,106 @@ func TestProblemInvalidAnswerResponse(t *testing.T) {
 		})
 	}
 }
+
+type visibilityProblemStore struct {
+	*stores.ProblemStore
+}
+
+func (visibilityProblemStore) GetProblemList(context.Context, string) ([]dto.ProblemOverview, error) {
+	return []dto.ProblemOverview{{ID: "prob-1", Name: "Problem 1", Score: 10, Type: "code"}}, nil
+}
+
+func (visibilityProblemStore) GetProblem(context.Context, string, string) (*dto.GetProblemStatementResponse, error) {
+	return &dto.GetProblemStatementResponse{ProblemID: "prob-1", Name: "Problem 1", Score: 10, Type: models.Code}, nil
+}
+
+func TestProblemVisibilityBeforeStartAndRegistration(t *testing.T) {
+	now := time.Now().UnixMilli()
+	tests := []struct {
+		name       string
+		start, end int64
+		registered bool
+		lookupErr  error
+		wantCode   int
+	}{
+		{
+			name:       "upcoming contest - hidden before start",
+			start:      now + 60_000,
+			end:        now + 120_000,
+			registered: true,
+			wantCode:   http.StatusForbidden,
+		},
+		{
+			name:       "unregistered user - forbidden",
+			start:      now - 60_000,
+			end:        now + 60_000,
+			registered: false,
+			wantCode:   http.StatusForbidden,
+		},
+		{
+			name:       "running contest and registered - visible",
+			start:      now - 60_000,
+			end:        now + 60_000,
+			registered: true,
+			wantCode:   http.StatusOK,
+		},
+		{
+			name:       "ended contest and registered - visible",
+			start:      now - 120_000,
+			end:        now - 60_000,
+			registered: true,
+			wantCode:   http.StatusOK,
+		},
+		{
+			name:      "contest not found - 404",
+			lookupErr: common.ContestNotFoundError,
+			wantCode:  http.StatusNotFound,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			storage := &stores.Storage{
+				Contests: submissionContestStore{
+					contest:    models.Contest{ID: "contest", StartTime: tc.start, EndTime: tc.end},
+					registered: tc.registered,
+					err:        tc.lookupErr,
+				},
+				Problems: visibilityProblemStore{},
+			}
+			controller := NewContestController(services.NewContestService(storage, nil))
+
+			// Test problem list endpoint
+			{
+				recorder := httptest.NewRecorder()
+				ctx := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/contests/contest/problems", nil), recorder)
+				ctx.SetParamNames("id")
+				ctx.SetParamValues("contest")
+				ctx.Set(common.AUTH_USER_ID, "user-1")
+
+				if err := controller.GetContestProblemsList(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if recorder.Code != tc.wantCode {
+					t.Errorf("GetContestProblemsList HTTP %d, want %d", recorder.Code, tc.wantCode)
+				}
+			}
+
+			// Test problem statement endpoint
+			{
+				recorder := httptest.NewRecorder()
+				ctx := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/contests/contest/problems/prob-1", nil), recorder)
+				ctx.SetParamNames("id", "problem_id")
+				ctx.SetParamValues("contest", "prob-1")
+				ctx.Set(common.AUTH_USER_ID, "user-1")
+
+				if err := controller.GetContestProblem(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if recorder.Code != tc.wantCode {
+					t.Errorf("GetContestProblem HTTP %d, want %d", recorder.Code, tc.wantCode)
+				}
+			}
+		})
+	}
+}

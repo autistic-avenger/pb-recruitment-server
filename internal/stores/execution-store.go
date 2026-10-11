@@ -355,20 +355,18 @@ func (s *ExecutionStore) ProcessFinal(ctx context.Context, r FinalExecutionResul
 		if err != nil {
 			return err
 		}
-		if verdict == "accepted" {
-			_, err = tx.ExecContext(ctx, `INSERT INTO rankings(contest_id,user_id,score,hidden,disqualified) VALUES($1,$2,0,false,false) ON CONFLICT(contest_id,user_id) DO NOTHING`, contestID, userID)
-			if err != nil {
-				return err
-			}
-			var rankID string
-			err = tx.QueryRowContext(ctx, `SELECT user_id FROM rankings WHERE contest_id=$1 AND user_id=$2 FOR UPDATE`, contestID, userID).Scan(&rankID)
-			if err != nil {
-				return err
-			}
-			_, err = tx.ExecContext(ctx, `UPDATE rankings SET score=COALESCE((SELECT sum(p.score) FROM problems p WHERE p.contest_id=$1 AND EXISTS(SELECT 1 FROM submissions x WHERE x.contest_id=p.contest_id AND x.problem_id=p.id AND x.user_id=$2 AND x.status='accepted')),0) WHERE contest_id=$1 AND user_id=$2`, contestID, userID)
-			if err != nil {
-				return err
-			}
+		_, err = tx.ExecContext(ctx, `INSERT INTO rankings(contest_id,user_id,score,hidden,disqualified) VALUES($1,$2,0,false,false) ON CONFLICT(contest_id,user_id) DO NOTHING`, contestID, userID)
+		if err != nil {
+			return err
+		}
+		var rankID string
+		err = tx.QueryRowContext(ctx, `SELECT user_id FROM rankings WHERE contest_id=$1 AND user_id=$2 FOR UPDATE`, contestID, userID).Scan(&rankID)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE rankings SET score=COALESCE((SELECT sum(p.score) FROM problems p WHERE p.contest_id=$1 AND EXISTS(SELECT 1 FROM submissions x WHERE x.contest_id=p.contest_id AND x.problem_id=p.id AND x.user_id=$2 AND x.status='accepted')),0) WHERE contest_id=$1 AND user_id=$2`, contestID, userID)
+		if err != nil {
+			return err
 		}
 	}
 	return tx.Commit()

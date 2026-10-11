@@ -316,6 +316,23 @@ func (cs *ContestService) GetProblemVisibility(ctx context.Context, contestID st
 	return nil
 }
 
+func (cs *ContestService) ValidateContestAccess(ctx context.Context, contestID string, userID string) error {
+	contest, err := cs.GetContest(ctx, contestID, userID)
+	if err != nil {
+		return err
+	}
+
+	if contest.IsRegistered == nil || !*contest.IsRegistered {
+		return common.UserNotRegisteredError
+	}
+
+	if contest.GetRunningStatus() != models.ContestRunningOpen {
+		return common.ContestNotRunningError
+	}
+
+	return nil
+}
+
 func (cs *ContestService) GetContestProblemsList(ctx context.Context, contestID string) ([]dto.ProblemOverview, error) {
 	return cs.stores.Problems.GetProblemList(ctx, contestID)
 }

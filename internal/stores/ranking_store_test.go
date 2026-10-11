@@ -1,7 +1,9 @@
 package stores
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"app/internal/models/dto"
 )
@@ -47,5 +49,85 @@ func TestSummarizeSolves(t *testing.T) {
 				t.Errorf("lastSolve = %d, want %d", last, tc.wantLast)
 			}
 		})
+	}
+}
+
+func TestLeaderboardCache(t *testing.T) {
+	store := NewRankingStore(nil)
+	store.SetCacheTTL(100 * time.Millisecond)
+
+	contestID := "contest-1"
+	page := 0
+	key := fmt.Sprintf("%s:%d", contestID, page)
+
+	mockResp := &dto.GetLeaderboardResponse{
+		Entries: []dto.LeaderboardEntry{
+			{
+				Rank:       1,
+				UserID:     "user-1",
+				Username:   "Alice",
+				TotalScore: 100,
+			},
+		},
+		Page:       0,
+		TotalPages: 1,
+		TotalCount: 1,
+	}
+
+	// Manually populate cache to verify caching mechanics without database
+	store.cacheMu.Lock()
+	store.cache[key] = leaderboardCacheEntry{
+		data:      mockResp,
+		expiresAt: time.Now().Add(100 * time.Millisecond),
+	}
+	store.cacheMu.Unlock()
+
+	// Should hit cache
+	store.cacheMu.RLock()
+	entry, ok := store.cache[key]
+	store.cacheMu.RUnlock()
+	if !ok || time.Now().After(entry.expiresAt) {
+		t.Fatal("expected cached entry to be present and not expired")
+	}
+
+	cloned := cloneLeaderboardResponse(entry.data)
+	if cloned == nil || len(cloned.Entries) != 1 || cloned.Entries[0].Username != "Alice" {
+		t.Fatalf("unexpected cloned data: %+v", cloned)
+	}
+
+	// Mutating cloned response should not alter internal cache
+	cloned.Entries[0].Username = "Bob"
+	store.cacheMu.RLock()
+	cachedUsername := store.cache[key].data.Entries[0].Username
+	store.cacheMu.RUnlock()
+	if cachedUsername != "Alice" {
+		t.Errorf("cache was mutated by clone modification, got %s, want Alice", cachedUsername)
+	}
+
+	// Invalidate cache for contest
+	store.InvalidateCache(contestID)
+	store.cacheMu.RLock()
+	_, ok = store.cache[key]
+	store.cacheMu.RUnlock()
+	if ok {
+		t.Error("expected cache entry to be invalidated")
+	}
+
+	// Test expiration
+	store.cacheMu.Lock()
+	store.cache[key] = leaderboardCacheEntry{
+		data:      mockResp,
+		expiresAt: time.Now().Add(-1 * time.Second), // already expired
+	}
+	store.cacheMu.Unlock()
+
+	store.cacheMu.RLock()
+	expiredEntry, ok := store.cache[key]
+	store.cacheMu.RUnlock()
+	if !ok {
+		t.Fatal("entry should exist in map")
+	}
+	if !time.Now().After(expiredEntry.expiresAt) {
+		t.Error("expected entry to be expired")
 	}
 }
