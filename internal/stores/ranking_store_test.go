@@ -252,6 +252,9 @@ func assignRanks(p []participantSummary) {
 		} else {
 			p[i].Rank = i + 1
 		}
+	}
+}
+
 func TestLeaderboardCache(t *testing.T) {
 	store := NewRankingStore(nil)
 	store.SetCacheTTL(100 * time.Millisecond)

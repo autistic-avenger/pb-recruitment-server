@@ -146,6 +146,8 @@ func (m *mockRankingStore) GetLeaderboard(ctx context.Context, contestID string,
 	return nil, nil
 }
 
+func (m *mockRankingStore) InvalidateCache(contestID string) {}
+
 func TestHandleConsolidateContest(t *testing.T) {
 	t.Run("success with regrade", func(t *testing.T) {
 		var calledContestID string
@@ -238,6 +240,8 @@ func TestHandleConsolidateContest(t *testing.T) {
 			t.Fatalf("HTTP %d, want 500", recorder.Code)
 		}
 	})
+}
+
 type visibilityProblemStore struct {
 	*stores.ProblemStore
 }

@@ -8,16 +8,14 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"sort"
-	"strings"
-	"time"
-
-	"github.com/lib/pq"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 type leaderboardCacheEntry struct {
@@ -35,6 +33,7 @@ type RankingStore struct {
 func NewRankingStore(db *sql.DB) *RankingStore {
 	if db != nil {
 		_, _ = db.Exec("ALTER TABLE rankings ADD COLUMN IF NOT EXISTS rank INT DEFAULT 0")
+	}
 	ttl := 3 * time.Second
 	if ttlStr := os.Getenv("LEADERBOARD_CACHE_TTL_SECONDS"); ttlStr != "" {
 		if sec, err := strconv.Atoi(ttlStr); err == nil && sec >= 0 {
@@ -93,10 +92,6 @@ func cloneLeaderboardResponse(res *dto.GetLeaderboardResponse) *dto.GetLeaderboa
 		clone.Entries[i] = entryCopy
 	}
 	return &clone
-}
-
-func (s *RankingStore) InvalidateCache(contestID string) {
-	// Invalidate leaderboard cache if enabled
 }
 
 func (s *RankingStore) UpdateLeaderboardUser(ctx context.Context, contestID string, userID string, req *dto.UpdateLeaderboardUserRequest) error {

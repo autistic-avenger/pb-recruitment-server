@@ -103,6 +103,8 @@ func (s serviceRankingTestStore) GetLeaderboard(ctx context.Context, contestID s
 	return nil, nil
 }
 
+func (s serviceRankingTestStore) InvalidateCache(contestID string) {}
+
 func TestConsolidateContestService(t *testing.T) {
 	t.Run("nil ranking store error", func(t *testing.T) {
 		svc := NewContestService(&stores.Storage{}, nil)
