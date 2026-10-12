@@ -128,7 +128,7 @@ func TestJudge0FinalResults(t *testing.T) {
 		{13, "judge_error", "judge_error"}, {14, "judge_error", "judge_error"},
 	} {
 		t.Run(tc.verdict+fmt.Sprint(tc.id), func(t *testing.T) {
-			_, _, _, sub, executions := executionFixture(t, db, 1)
+			user, contest, _, sub, executions := executionFixture(t, db, 1)
 			id, token := executions[0].ID, uuid.NewString()
 			body := fmt.Sprintf(`{"token":%q,"time":"0.125","memory":2048,"status":{"id":%d}}`, token, tc.id)
 			for i := 0; i < 2; i++ {
@@ -147,6 +147,19 @@ func TestJudge0FinalResults(t *testing.T) {
 			}
 			if err := storage.Executions.SaveTokens(context.Background(), map[string]string{id: token}); err != nil {
 				t.Fatal(err)
+			}
+
+			// Assert that ProcessFinal creates a ranking row with 0 score for non-accepted and full score for accepted
+			var rankingScore int
+			if err := db.QueryRow(`SELECT score FROM rankings WHERE contest_id=$1 AND user_id=$2`, contest, user).Scan(&rankingScore); err != nil {
+				t.Fatalf("ranking row missing for verdict %s: %v", tc.verdict, err)
+			}
+			wantScore := 0
+			if tc.verdict == "accepted" {
+				wantScore = 10
+			}
+			if rankingScore != wantScore {
+				t.Fatalf("ranking score = %d, want %d for verdict %s", rankingScore, wantScore, tc.verdict)
 			}
 		})
 	}
@@ -491,3 +504,60 @@ func TestRepairLegacyResultIndex(t *testing.T) {
 	}
 	assertSubmission(t, db, sub, "accepted", 0, 0)
 }
+
+func TestLeaderboardCachePostgres(t *testing.T) {
+	db := postgresTestDB(t)
+	ctx := context.Background()
+	user, contest, _, _, _ := executionFixture(t, db, 1)
+
+	if _, err := db.ExecContext(ctx, `INSERT INTO rankings(contest_id,user_id,score,hidden,disqualified) VALUES($1,$2,50,false,false) ON CONFLICT(contest_id,user_id) DO UPDATE SET score=50`, contest, user); err != nil {
+		t.Fatal(err)
+	}
+
+	rankingStore := stores.NewRankingStore(db)
+	rankingStore.SetCacheTTL(10 * time.Second)
+
+	// Page 0 (valid page, totalPages = 1)
+	resp0, err := rankingStore.GetLeaderboard(ctx, contest, 0)
+	if err != nil {
+		t.Fatalf("page 0 error: %v", err)
+	}
+	if len(resp0.Entries) != 1 || resp0.Entries[0].TotalScore != 50 {
+		t.Fatalf("unexpected page 0 result: %+v", resp0)
+	}
+
+	// Update score in DB directly to verify cache hit returns cached score 50
+	if _, err := db.ExecContext(ctx, `UPDATE rankings SET score=99 WHERE contest_id=$1 AND user_id=$2`, contest, user); err != nil {
+		t.Fatal(err)
+	}
+
+	cachedResp, err := rankingStore.GetLeaderboard(ctx, contest, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cachedResp.Entries[0].TotalScore != 50 {
+		t.Fatalf("expected cached score 50, got %d", cachedResp.Entries[0].TotalScore)
+	}
+
+	// Page 5 (out of bounds, page >= max(totalPages, 1) which is 1)
+	resp5, err := rankingStore.GetLeaderboard(ctx, contest, 5)
+	if err != nil {
+		t.Fatalf("page 5 error: %v", err)
+	}
+	if len(resp5.Entries) != 0 {
+		t.Fatalf("expected empty entries for page 5, got %d", len(resp5.Entries))
+	}
+
+	// Invalidate cache for contest
+	rankingStore.InvalidateCache(contest)
+
+	// Now page 0 should fetch fresh data from DB (score 99)
+	freshResp, err := rankingStore.GetLeaderboard(ctx, contest, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if freshResp.Entries[0].TotalScore != 99 {
+		t.Fatalf("expected fresh score 99, got %d", freshResp.Entries[0].TotalScore)
+	}
+}
+

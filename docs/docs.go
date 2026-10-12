@@ -1825,6 +1825,15 @@ const docTemplate = `{
                             }
                         }
                     },
+                    "429": {
+                        "description": "Too many requests: rate limit exceeded",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
                     "500": {
                         "description": "Internal server error"
                     }

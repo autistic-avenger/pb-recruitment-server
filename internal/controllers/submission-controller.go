@@ -174,6 +174,7 @@ func (sc *SubmissionController) ListUserSubmissions(ctx echo.Context) error {
 // @Failure      403 "Forbidden: empty body if not registered; JSON object with an error string if contest is not running"
 // @Failure      404 "Contest or problem not found"
 // @Failure      409 {object} map[string]string "Submission already exists"
+// @Failure      429 {object} map[string]string "Too many requests: rate limit exceeded"
 // @Failure      500 "Internal server error"
 // @Router       /submission/submit [post]
 func (sc *SubmissionController) SubmitSolution(ctx echo.Context) error {
@@ -197,7 +198,7 @@ func (sc *SubmissionController) SubmitSolution(ctx echo.Context) error {
 			"error": "failed to check contest registration",
 		})
 	}
-	if !*contest_response.IsRegistered {
+	if contest_response.IsRegistered == nil || !*contest_response.IsRegistered {
 		return ctx.NoContent(http.StatusForbidden)
 	}
 	if contest_response.GetRunningStatus() != models.ContestRunningOpen {
@@ -217,6 +218,12 @@ func (sc *SubmissionController) SubmitSolution(ctx echo.Context) error {
 		if errors.Is(err, common.ErrUnsupportedLanguage) || errors.Is(err, common.ErrNoTestcases) || errors.Is(err, common.ErrInvalidCode) {
 			return ctx.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
+		if errors.Is(err, common.ErrRateLimitExceeded) {
+			return ctx.JSON(http.StatusTooManyRequests, map[string]string{
+				"error": err.Error(),
+			})
+		}
+		log.Errorf("create submission for user %s: %v", userID, err)
 		return ctx.NoContent(http.StatusInternalServerError)
 	}
 

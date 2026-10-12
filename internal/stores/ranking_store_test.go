@@ -2,7 +2,10 @@ package stores
 
 import (
 	"sort"
+	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"app/internal/models/dto"
 )
@@ -249,5 +252,72 @@ func assignRanks(p []participantSummary) {
 		} else {
 			p[i].Rank = i + 1
 		}
+func TestLeaderboardCache(t *testing.T) {
+	store := NewRankingStore(nil)
+	store.SetCacheTTL(100 * time.Millisecond)
+
+	contestID := "contest-1"
+	page := 0
+	key := fmt.Sprintf("%s:%d", contestID, page)
+
+	mockResp := &dto.GetLeaderboardResponse{
+		Entries: []dto.LeaderboardEntry{
+			{
+				Rank:       1,
+				UserID:     "user-1",
+				Username:   "Alice",
+				TotalScore: 100,
+			},
+		},
+		Page:       0,
+		TotalPages: 1,
+		TotalCount: 1,
+	}
+
+	// Manually populate cache to verify caching mechanics without database
+	store.cacheMu.Lock()
+	store.cache[key] = leaderboardCacheEntry{
+		data:      mockResp,
+		expiresAt: time.Now().Add(100 * time.Millisecond),
+	}
+	store.cacheMu.Unlock()
+
+	// Should hit cache via GetLeaderboard
+	resp, err := store.GetLeaderboard(context.Background(), contestID, page)
+	if err != nil {
+		t.Fatalf("expected cache hit from GetLeaderboard, got error: %v", err)
+	}
+	if resp == nil || len(resp.Entries) != 1 || resp.Entries[0].Username != "Alice" {
+		t.Fatalf("unexpected cached data: %+v", resp)
+	}
+
+	// Mutating cloned response should not alter internal cache
+	resp.Entries[0].Username = "Bob"
+	respAgain, err := store.GetLeaderboard(context.Background(), contestID, page)
+	if err != nil {
+		t.Fatalf("expected second cache hit: %v", err)
+	}
+	if respAgain.Entries[0].Username != "Alice" {
+		t.Errorf("cache was mutated by clone modification, got %s, want Alice", respAgain.Entries[0].Username)
+	}
+
+	// Invalidate cache for contest
+	store.InvalidateCache(contestID)
+	// Cache miss should attempt DB query and fail because db is nil
+	if _, err := store.GetLeaderboard(context.Background(), contestID, page); err == nil {
+		t.Fatal("expected DB error after cache invalidation")
+	}
+
+	// Test expiration
+	store.cacheMu.Lock()
+	store.cache[key] = leaderboardCacheEntry{
+		data:      mockResp,
+		expiresAt: time.Now().Add(-1 * time.Second), // already expired
+	}
+	store.cacheMu.Unlock()
+
+	// Expired entry should be treated as cache miss and attempt DB query
+	if _, err := store.GetLeaderboard(context.Background(), contestID, page); err == nil {
+		t.Fatal("expected DB error for expired entry")
 	}
 }

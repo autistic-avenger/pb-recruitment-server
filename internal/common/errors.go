@@ -27,4 +27,5 @@ var (
 	ErrInvalidCode                 = errors.New("code is required")
 	ErrInvalidAnswer               = errors.New("MCQ answer must refer to an existing option")
 	ErrProblemsLocked              = errors.New("problems cannot be edited or deleted after the contest starts")
+	ErrRateLimitExceeded           = errors.New("rate limit exceeded, please wait before submitting again")
 )

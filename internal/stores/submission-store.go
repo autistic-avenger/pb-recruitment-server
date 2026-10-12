@@ -431,3 +431,38 @@ func (s *SubmissionStore) PendingCodeWithoutExecutions(ctx context.Context, cuto
 	}
 	return ids, rows.Err()
 }
+
+func (s *SubmissionStore) CheckSubmissionRateLimit(ctx context.Context, userID string, cooldownSeconds int64) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+
+	if cooldownSeconds <= 0 {
+		return nil
+	}
+
+	now := time.Now().Unix()
+	const q = `
+		INSERT INTO submission_rate_limits (user_id, last_submission_at)
+		VALUES ($1, $2)
+		ON CONFLICT (user_id) DO UPDATE
+		SET last_submission_at = EXCLUDED.last_submission_at
+		WHERE EXCLUDED.last_submission_at - submission_rate_limits.last_submission_at >= $3
+	`
+
+	res, err := s.db.ExecContext(ctx, q, userID, now, cooldownSeconds)
+	if err != nil {
+		return fmt.Errorf("check submission rate limit: %w", err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rate limit rows affected: %w", err)
+	}
+
+	if affected == 0 {
+		return common.ErrRateLimitExceeded
+	}
+
+	return nil
+}

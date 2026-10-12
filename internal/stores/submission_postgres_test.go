@@ -109,3 +109,64 @@ func TestJudgeMCQPostgres(t *testing.T) {
 		assertScore()
 	}
 }
+
+func TestSubmissionRateLimitPostgres(t *testing.T) {
+	db := postgresTestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	user := uuid.NewString()
+	store := stores.NewSubmissionStore(db)
+
+	// First submission attempt passes
+	if err := store.CheckSubmissionRateLimit(ctx, user, 5); err != nil {
+		t.Fatalf("first check failed: %v", err)
+	}
+
+	// Immediate second attempt within 5s cooldown fails
+	if err := store.CheckSubmissionRateLimit(ctx, user, 5); !errors.Is(err, common.ErrRateLimitExceeded) {
+		t.Fatalf("expected ErrRateLimitExceeded, got %v", err)
+	}
+
+	// Another user passes independently
+	otherUser := uuid.NewString()
+	if err := store.CheckSubmissionRateLimit(ctx, otherUser, 5); err != nil {
+		t.Fatalf("other user check failed: %v", err)
+	}
+
+	// Simulate concurrent requests across replicas for the same user
+	concurrentUser := uuid.NewString()
+	const workers = 10
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	results := make([]error, workers)
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			results[idx] = store.CheckSubmissionRateLimit(ctx, concurrentUser, 10)
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+
+	successCount := 0
+	rateLimitedCount := 0
+	for _, res := range results {
+		if res == nil {
+			successCount++
+		} else if errors.Is(res, common.ErrRateLimitExceeded) {
+			rateLimitedCount++
+		} else {
+			t.Fatalf("unexpected error: %v", res)
+		}
+	}
+
+	if successCount != 1 || rateLimitedCount != workers-1 {
+		t.Fatalf("expected exactly 1 success and %d rate limited, got %d successes and %d rate limited",
+			workers-1, successCount, rateLimitedCount)
+	}
+}

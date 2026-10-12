@@ -518,12 +518,12 @@ func (cc *ContestController) GetContestProblemsList(ctx echo.Context) error {
 
 	err := cc.contestService.GetProblemVisibility(ctx.Request().Context(), contestID, userID)
 	if err != nil {
-		if err == common.ContestNotFoundError {
+		if errors.Is(err, common.ContestNotFoundError) {
 			return ctx.JSON(http.StatusNotFound, map[string]string{
 				"error": common.ContestNotFoundError.Error(),
 			})
-		} else if err == common.UserNotRegisteredError ||
-			err == common.ContestNotRunningError {
+		} else if errors.Is(err, common.UserNotRegisteredError) ||
+			errors.Is(err, common.ContestNotRunningError) {
 			return ctx.JSON(http.StatusForbidden, map[string]string{
 				"error": err.Error(),
 			})
@@ -535,7 +535,7 @@ func (cc *ContestController) GetContestProblemsList(ctx echo.Context) error {
 
 	problems, err := cc.contestService.GetContestProblemsList(ctx.Request().Context(), contestID)
 	if err != nil {
-		if err == common.ContestNotFoundError {
+		if errors.Is(err, common.ContestNotFoundError) {
 			return ctx.JSON(http.StatusNotFound, map[string]string{
 				"error": common.ContestNotFoundError.Error(),
 			})
@@ -569,12 +569,12 @@ func (cc *ContestController) GetContestProblem(ctx echo.Context) error {
 
 	err := cc.contestService.GetProblemVisibility(ctx.Request().Context(), contestID, userID)
 	if err != nil {
-		if err == common.ContestNotFoundError {
+		if errors.Is(err, common.ContestNotFoundError) {
 			return ctx.JSON(http.StatusNotFound, map[string]string{
 				"error": common.ContestNotFoundError.Error(),
 			})
-		} else if err == common.UserNotRegisteredError ||
-			err == common.ContestNotRunningError {
+		} else if errors.Is(err, common.UserNotRegisteredError) ||
+			errors.Is(err, common.ContestNotRunningError) {
 			return ctx.JSON(http.StatusForbidden, map[string]string{
 				"error": err.Error(),
 			})

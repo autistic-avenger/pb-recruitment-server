@@ -35,6 +35,7 @@ type Storage struct {
 		JudgeMCQ(context.Context, string) error
 		MarkFailed(context.Context, string) error
 		PendingCodeWithoutExecutions(context.Context, int64, int) ([]string, error)
+		CheckSubmissionRateLimit(context.Context, string, int64) error
 	}
 	Executions interface {
 		InsertBatch(ctx context.Context, submissionID string, indexes []int) ([]models.Execution, error)
@@ -49,6 +50,7 @@ type Storage struct {
 		UpdateLeaderboardUser(ctx context.Context, contestID string, userID string, req *dto.UpdateLeaderboardUserRequest) error
 		GetLeaderboard(ctx context.Context, contestID string, page int) (*dto.GetLeaderboardResponse, error)
 		ConsolidateContest(ctx context.Context, contestID string, regradeMCQs bool) (*dto.ConsolidationResponse, error)
+		InvalidateCache(contestID string)
 	}
 	Problems interface {
 		CreateProblem(ctx context.Context, p *models.Problem) error

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -65,6 +66,28 @@ func (ss *SubmissionService) ListUserSubmissionsByProblemID(ctx context.Context,
 	return sub, nil
 }
 
+func (ss *SubmissionService) CheckRateLimit(ctx context.Context, userID string) error {
+	if ss == nil || ss.stores == nil || ss.stores.Submissions == nil {
+		return nil
+	}
+
+	cooldown := int64(5) // default 5 seconds
+	if envVal := os.Getenv("SUBMISSION_RATE_LIMIT_SECONDS"); envVal != "" {
+		if val, err := strconv.ParseInt(envVal, 10, 64); err == nil {
+			cooldown = val
+		}
+	}
+
+	return ss.stores.Submissions.CheckSubmissionRateLimit(ctx, userID, cooldown)
+}
+
+func (ss *SubmissionService) CheckRateLimitWithCooldown(ctx context.Context, userID string, cooldown int64) error {
+	if ss == nil || ss.stores == nil || ss.stores.Submissions == nil {
+		return nil
+	}
+	return ss.stores.Submissions.CheckSubmissionRateLimit(ctx, userID, cooldown)
+}
+
 func (ss *SubmissionService) JudgeMCQ(ctx context.Context, submissionID string) error {
 	if err := ss.stores.Submissions.JudgeMCQ(ctx, submissionID); err != nil {
 		return ss.markSubmissionFailed(ctx, submissionID, err)
@@ -97,6 +120,9 @@ func (ss *SubmissionService) CreateSubmission(ctx context.Context, userID string
 		return "", common.ErrNotFound
 	}
 	if submissionType != models.Code {
+		if err := ss.CheckRateLimit(ctx, userID); err != nil {
+			return "", err
+		}
 		return ss.stores.Submissions.CreateSubmission(ctx, sub)
 	}
 
@@ -119,6 +145,10 @@ func (ss *SubmissionService) CreateSubmission(ctx context.Context, userID string
 	}
 	if len(inputs) == 0 {
 		return "", common.ErrNoTestcases
+	}
+
+	if err := ss.CheckRateLimit(ctx, userID); err != nil {
+		return "", err
 	}
 
 	submissionID, err := ss.stores.Submissions.CreateSubmission(ctx, sub)
