@@ -223,6 +223,7 @@ func (sc *SubmissionController) SubmitSolution(ctx echo.Context) error {
 				"error": err.Error(),
 			})
 		}
+		log.Errorf("create submission for user %s: %v", userID, err)
 		return ctx.NoContent(http.StatusInternalServerError)
 	}
 

@@ -6,13 +6,17 @@ import (
 	"app/internal/models/dto"
 	"app/internal/services"
 	"app/internal/stores"
+	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/gommon/log"
 )
 
 type submissionContestStore struct {
@@ -139,5 +143,38 @@ func TestSubmitSolutionRateLimit(t *testing.T) {
 	}
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("HTTP %d, want 429", recorder.Code)
+	}
+}
+
+func TestSubmitSolutionLogsCreateFailure(t *testing.T) {
+	now := time.Now().UnixMilli()
+	storeErr := errors.New("relation submission_rate_limits does not exist")
+	storage := &stores.Storage{
+		Contests: submissionContestStore{
+			contest: models.Contest{StartTime: now - 60_000, EndTime: now + 60_000}, registered: true,
+		},
+		Problems:    submissionProblemStore{},
+		Submissions: &rateLimitedSubmissionStore{rateLimitErr: storeErr},
+	}
+	controller := NewSubmissionController(services.NewSubmissionService(storage, nil, nil), services.NewContestService(storage, nil), nil)
+	var output bytes.Buffer
+	previous := log.Output()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+	recorder := httptest.NewRecorder()
+	ctx := echo.New().NewContext(httptest.NewRequest(http.MethodPost, "/submission/submit", nil), recorder)
+	ctx.Set(common.AUTH_USER_ID, "user")
+	ctx.Set(common.VALIDATED_REQUEST_BODY, &dto.SubmitSubmissionRequest{ContestID: "contest", ProblemID: "problem", Type: models.MCQ, Option: []int{1}})
+	if err := controller.SubmitSolution(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("HTTP %d, want 500", recorder.Code)
+	}
+	if logged := output.String(); !strings.Contains(logged, "create submission for user user") || !strings.Contains(logged, storeErr.Error()) {
+		t.Fatalf("missing user or database error in log: %s", logged)
+	}
+	if strings.Contains(recorder.Body.String(), storeErr.Error()) {
+		t.Fatal("database error exposed in response")
 	}
 }
