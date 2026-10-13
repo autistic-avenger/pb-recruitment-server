@@ -151,7 +151,7 @@ func (c *Client) GetSubmissions(ctx context.Context, tokens []string) ([]*Submis
 	if c.baseURL == "" {
 		return nil, fmt.Errorf("%w: JUDGE0_URL is not set", ErrUnavailable)
 	}
-	query := url.Values{"tokens": {strings.Join(tokens, ",")}, "base64_encoded": {"false"}, "fields": {"token,time,memory,status"}}
+	query := url.Values{"tokens": {strings.Join(tokens, ",")}, "base64_encoded": {"true"}, "fields": {"token,time,memory,status,compile_output,stderr"}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/submissions/batch?"+query.Encode(), nil)
 	if err != nil {
 		return nil, err

@@ -14,6 +14,7 @@ import (
 type FinalExecutionResult struct {
 	ExecutionID, Token, Status string
 	Runtime, Memory            int64
+	CompileOutput, Stderr      string
 }
 type executionChild struct {
 	id, status    string
@@ -304,7 +305,7 @@ func (s *ExecutionStore) ProcessFinal(ctx context.Context, r FinalExecutionResul
 		}
 	}
 	if !alreadyTerminal {
-		_, err = tx.ExecContext(ctx, `UPDATE submission_executions SET status=$2,runtime=$3,memory=$4 WHERE id=$1 AND status='pending'`, r.ExecutionID, r.Status, r.Runtime, r.Memory)
+		_, err = tx.ExecContext(ctx, `UPDATE submission_executions SET status=$2,runtime=$3,memory=$4,compile_output=$5,stderr=$6 WHERE id=$1 AND status='pending'`, r.ExecutionID, r.Status, r.Runtime, r.Memory, r.CompileOutput, r.Stderr)
 		if err != nil {
 			return err
 		}

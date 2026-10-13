@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/labstack/gommon/log"
 	"go.uber.org/fx"
@@ -259,7 +260,55 @@ func (ss *SubmissionService) HandleJudge0Callback(ctx context.Context, execution
 	if payload.Memory != nil {
 		memory = *payload.Memory
 	}
-	return ss.stores.Executions.ProcessFinal(ctx, stores.FinalExecutionResult{ExecutionID: executionID, Token: payload.Token, Status: status, Runtime: runtime, Memory: memory})
+	return ss.stores.Executions.ProcessFinal(ctx, stores.FinalExecutionResult{
+		ExecutionID:   executionID,
+		Token:         payload.Token,
+		Status:        status,
+		Runtime:       runtime,
+		Memory:        memory,
+		CompileOutput: judgeOutputText(payload.CompileOutput),
+		Stderr:        judgeOutputText(payload.Stderr),
+	})
+}
+
+const judgeOutputLimit = 4096
+
+func judgeOutputText(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	// Judge0 1.13.1 callbacks always Base64-encode output fields, and
+	// recovery requests base64_encoded=true. Malformed data is discarded rather
+	// than treated as plain text, which could corrupt valid-looking Base64.
+	decoded, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return ""
+	}
+	return truncateJudgeOutput(sanitizeJudgeOutput(string(decoded)))
+}
+
+// sanitizeJudgeOutput replaces invalid UTF-8 sequences with U+FFFD and
+// strips NUL bytes that PostgreSQL TEXT columns reject (SQLSTATE 22021).
+func sanitizeJudgeOutput(s string) string {
+	if !utf8.ValidString(s) {
+		s = strings.ToValidUTF8(s, "\ufffd")
+	}
+	return strings.ReplaceAll(s, "\x00", "")
+}
+
+func truncateJudgeOutput(s string) string {
+	if len(s) <= judgeOutputLimit {
+		return s
+	}
+	s = s[:judgeOutputLimit]
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s
 }
 
 func mapJudgeStatus(id int) (string, bool) {
@@ -415,7 +464,7 @@ func (ss *SubmissionService) RecoverJudge0(ctx context.Context) {
 				if !final {
 					continue
 				}
-				payload := judge0.CallbackResult{Token: result.Token, Time: result.Time, Memory: result.Memory}
+				payload := judge0.CallbackResult{Token: result.Token, Time: result.Time, Memory: result.Memory, CompileOutput: result.CompileOutput, Stderr: result.Stderr}
 				payload.Status.ID = result.Status.ID
 				if e = ss.HandleJudge0Callback(ctx, item.ID, payload); e != nil {
 					log.Errorf("judge0 recovery result failed: %v", e)

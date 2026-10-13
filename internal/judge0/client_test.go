@@ -139,6 +139,23 @@ func TestBatchResultValidation(t *testing.T) {
 	}
 }
 
+func TestGetSubmissionsRequestsBase64(t *testing.T) {
+	// Judge0 rejects the entire batch GET with 400 if any submission
+	// has non-UTF-8 stderr and base64_encoded is false.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("base64_encoded"); got != "true" {
+			t.Errorf("base64_encoded = %q, want %q", got, "true")
+		}
+		w.Write([]byte(`{"submissions":[{"token":"a","status":{"id":3}}]}`))
+	}))
+	defer server.Close()
+	t.Setenv("JUDGE0_URL", server.URL)
+	t.Setenv("JUDGE0_AUTH_TOKEN", "")
+	if _, err := NewClient().GetSubmissions(context.Background(), []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDispatchTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		value string
