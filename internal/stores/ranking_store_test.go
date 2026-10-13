@@ -1,7 +1,6 @@
 package stores
 
 import (
-	"sort"
 	"context"
 	"fmt"
 	"testing"
@@ -216,44 +215,6 @@ func TestConsolidatorIdempotency(t *testing.T) {
 	}
 }
 
-func sortParticipantsForRanking(p []participantSummary) {
-	sort.SliceStable(p, func(i, j int) bool {
-		a, b := p[i], p[j]
-		if a.Disqualified != b.Disqualified {
-			return !a.Disqualified && b.Disqualified
-		}
-		if a.TotalScore != b.TotalScore {
-			return a.TotalScore > b.TotalScore
-		}
-		if a.ProblemsSolved != b.ProblemsSolved {
-			return a.ProblemsSolved > b.ProblemsSolved
-		}
-		if (a.ProblemsSolved > 0) != (b.ProblemsSolved > 0) {
-			return a.ProblemsSolved > 0
-		}
-		if a.LastSubmissionTime != b.LastSubmissionTime {
-			return a.LastSubmissionTime < b.LastSubmissionTime
-		}
-		if a.TotalAttempts != b.TotalAttempts {
-			return a.TotalAttempts < b.TotalAttempts
-		}
-		return a.UserID < b.UserID
-	})
-}
-
-func assignRanks(p []participantSummary) {
-	for i := range p {
-		if p[i].Disqualified {
-			p[i].Rank = 0
-			continue
-		}
-		if i > 0 && !p[i-1].Disqualified && isTied(p[i], p[i-1]) {
-			p[i].Rank = p[i-1].Rank
-		} else {
-			p[i].Rank = i + 1
-		}
-	}
-}
 
 func TestLeaderboardCache(t *testing.T) {
 	store := NewRankingStore(nil)

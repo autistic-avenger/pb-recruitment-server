@@ -230,7 +230,7 @@ func TestHandleConsolidateContest(t *testing.T) {
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/admin/contest/cid-123/consolidate", nil)
 		ctx := echo.New().NewContext(req, recorder)
-		ctx.SetParamNames("contestid")
+		ctx.SetParamNames("id")
 		ctx.SetParamValues("cid-123")
 
 		if err := controller.HandleConsolidateContest(ctx); err != nil {

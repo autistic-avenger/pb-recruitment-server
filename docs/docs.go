@@ -341,13 +341,8 @@ const docTemplate = `{
                         "type": "string",
                         "description": "Contest ID",
                         "name": "id",
-                        "in": "path"
-                    },
-                    {
-                        "type": "string",
-                        "description": "Contest ID",
-                        "name": "contestid",
-                        "in": "path"
+                        "in": "path",
+                        "required": true
                     },
                     {
                         "type": "boolean",
@@ -2420,6 +2415,9 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "participants_ranked": {
+                    "type": "integer"
+                },
+                "pending_submissions": {
                     "type": "integer"
                 },
                 "processed_at": {

@@ -36,6 +36,7 @@ type ConsolidationResponse struct {
 	ContestID          string `json:"contest_id"`
 	MCQsGraded         int    `json:"mcqs_graded"`
 	ParticipantsRanked int    `json:"participants_ranked"`
+	PendingSubmissions int    `json:"pending_submissions"`
 	ProcessedAt        int64  `json:"processed_at"`
 	Status             string `json:"status"`
 }

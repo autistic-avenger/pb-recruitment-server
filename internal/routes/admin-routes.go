@@ -46,7 +46,6 @@ func AddAdminRoutes(
 
 	//Leaderboard/User Management
 	adminGroup.PUT("/:contestid/leaderboard/:userid", contestController.HandleUpdateLeaderboardUser)
-	adminGroup.POST("/:contestid/consolidate", contestController.HandleConsolidateContest)
 	adminGroup.POST("/contest/:id/consolidate", contestController.HandleConsolidateContest)
 
 	adminGroup.GET("/contests/:contestId/registrations", contestController.GetContestRegistrations)

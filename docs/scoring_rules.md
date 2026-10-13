@@ -17,12 +17,13 @@ Each MCQ problem has a configured maximum score (`Score`), a set of options (`Op
     - A submission earns **100% of the problem score** if the candidate selects exactly all correct options and zero incorrect options.
 
 - **Partial Credit Policy**:
-  - **Strict Mode (Default)**:
+  - **Strict Mode (Currently Enforced)**:
     - Multiple-select MCQs follow all-or-nothing evaluation. If any correct option is omitted or any incorrect option is selected, 0 points are awarded.
-  - **Proportional Partial Credit (Configurable)**:
-    - If a candidate selects a strict subset of the correct options and **zero** incorrect options:
-      $$\text{Score} = \left\lfloor \text{ProblemScore} \times \frac{|\text{Selected Correct}|}{|\text{Total Correct}|} \right\rfloor$$
-    - If **any** incorrect option is chosen, the submission earns 0 points (strict penalty for incorrect guessing).
+  - **Proportional Partial Credit**:
+    - *Note*: Proportional partial credit is not currently implemented; only strict all-or-nothing evaluation exists. If implemented in future revisions:
+      - If a candidate selects a strict subset of the correct options and **zero** incorrect options:
+        $$\text{Score} = \left\lfloor \text{ProblemScore} \times \frac{|\text{Selected Correct}|}{|\text{Total Correct}|} \right\rfloor$$
+      - If **any** incorrect option is chosen, the submission earns 0 points (strict penalty for incorrect guessing).
 
 - **Penalties / Negative Marking**:
   - Incorrect MCQ submissions award 0 points by default. Total contest score for any candidate is bounded at a minimum of 0 (no negative contest totals).

@@ -815,8 +815,7 @@ func (cc *ContestController) GetLeaderboard(ctx echo.Context) error {
 // @Tags         Admin - Leaderboard
 // @Produce      json
 // @Security     BearerAuth
-// @Param        id path string false "Contest ID"
-// @Param        contestid path string false "Contest ID"
+// @Param        id path string true "Contest ID"
 // @Param        regrade query bool false "Re-grade already graded MCQs"
 // @Success      200 {object} dto.ConsolidationResponse
 // @Failure      400 {object} map[string]string "Contest ID is required"
