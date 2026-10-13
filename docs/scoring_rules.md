@@ -92,8 +92,10 @@ The Consolidator is designed to run at contest conclusion:
 2. **Optional Re-grading**: Allows re-evaluating all MCQ submissions if answer keys were revised by contest authors.
 3. **Combines Coding and MCQ Results**: Evaluates every registered participant and candidate who submitted solutions.
 4. **Applies Tie-Breakers**: Sorts and assigns final ranks.
-5. **Persists to Database**: Upserts final scores and ranks into the `rankings` table and refreshes materialized views (`ranking_mv`).
+5. **Persists to Database**: Upserts final scores and ranks into the `rankings` table in a single set-based transaction.
 6. **Idempotent**: Safe to run multiple times without score duplication or state corruption.
 
-### Execution Mode
-- **Admin API Endpoint**: `POST /admin/contest/:id/consolidate` (or `POST /admin/:contestid/consolidate`) with optional `?regrade=true`
+### Execution Mode & Lifecycle
+- **Admin API Endpoint**: `POST /admin/contest/:id/consolidate` with optional `?regrade=true` and `?force=true`
+- **Execution Gate**: Consolidation requires the contest to be closed (`GetRunningStatus() == closed`) and all pending code submissions to be evaluated (pending count = 0), returning HTTP 409 Conflict otherwise. Admins can pass `?force=true` to override this gate.
+- **Leaderboard Integration**: Once a contest has been consolidated, the public leaderboard serves the official consolidated ranks, making all documented tie-breaks visible. If scores or visibility flags are modified after consolidation, a rerun is needed to refresh stored ranks.

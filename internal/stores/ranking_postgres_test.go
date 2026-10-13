@@ -36,7 +36,7 @@ func TestConsolidationRepeatedPostgres(t *testing.T) {
 	if err := problemStore.CreateProblem(ctx, &models.Problem{ID: mcqProblem, ContestID: contest, Name: "MCQ Problem", Type: models.MCQ, Score: 10, Answer: []int{1}, Options: []string{"a", "b"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := problemStore.CreateProblem(ctx, &models.Problem{ID: codeProblem, ContestID: contest, Name: "Code Problem", Type: models.Code, Score: 20}); err != nil {
+	if err := problemStore.CreateProblem(ctx, &models.Problem{ID: codeProblem, ContestID: contest, Name: "Code Problem", Type: models.Code, Score: 20, Options: []string{}, Answer: []int{}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -64,7 +64,7 @@ func TestConsolidationRepeatedPostgres(t *testing.T) {
 	rankingStore := stores.NewRankingStore(db)
 
 	// Run first consolidation
-	res1, err := rankingStore.ConsolidateContest(ctx, contest, false)
+	res1, err := rankingStore.ConsolidateContest(ctx, contest, false, false)
 	if err != nil {
 		t.Fatalf("first consolidation failed: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestConsolidationRepeatedPostgres(t *testing.T) {
 	}
 
 	// Run second consolidation (re-run should be idempotent)
-	res2, err := rankingStore.ConsolidateContest(ctx, contest, false)
+	res2, err := rankingStore.ConsolidateContest(ctx, contest, false, false)
 	if err != nil {
 		t.Fatalf("second consolidation failed: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestConsolidationConcurrentWithJudgeMCQPostgres(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-start
-		_, consErr = rankingStore.ConsolidateContest(ctx, contest, false)
+		_, consErr = rankingStore.ConsolidateContest(ctx, contest, false, false)
 	}()
 
 	close(start)

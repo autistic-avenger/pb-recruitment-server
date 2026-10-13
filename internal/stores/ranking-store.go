@@ -183,8 +183,14 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 
 	totalPages := (totalCount + leaderboardPageSize - 1) / leaderboardPageSize
 
-	const entriesQ = `
-		SELECT RANK() OVER (ORDER BY r.score DESC) AS rank, r.user_id, u.name,u.usn,r.score
+	var isConsolidated bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM rankings WHERE contest_id = $1 AND rank > 0)`, contestID).Scan(&isConsolidated); err != nil {
+		log.Printf("ranking-store: check consolidated query failed: %v", err)
+		return nil, fmt.Errorf("check consolidated rankings: %w", err)
+	}
+
+	entriesQ := `
+		SELECT RANK() OVER (ORDER BY r.score DESC) AS rank, r.user_id, u.name, u.usn, r.score
 		FROM rankings r
 		INNER JOIN users u 
 		ON r.user_id = u.id
@@ -194,6 +200,19 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 		ORDER BY rank ASC, u.name ASC, r.user_id ASC
 		LIMIT $2 OFFSET $3
 	`
+	if isConsolidated {
+		entriesQ = `
+		SELECT r.rank, r.user_id, u.name, u.usn, r.score
+		FROM rankings r
+		INNER JOIN users u 
+		ON r.user_id = u.id
+		WHERE r.contest_id = $1
+		AND r.hidden = false
+		AND r.disqualified = false
+		ORDER BY r.rank ASC, u.name ASC, r.user_id ASC
+		LIMIT $2 OFFSET $3
+	`
+	}
 
 	rows, err := s.db.QueryContext(ctx, entriesQ, contestID, leaderboardPageSize, offset)
 	if err != nil {
@@ -372,9 +391,6 @@ func SortParticipantsForRanking(p []participantSummary) {
 		if a.ProblemsSolved != b.ProblemsSolved {
 			return a.ProblemsSolved > b.ProblemsSolved
 		}
-		if (a.ProblemsSolved > 0) != (b.ProblemsSolved > 0) {
-			return a.ProblemsSolved > 0
-		}
 		if a.LastSubmissionTime != b.LastSubmissionTime {
 			return a.LastSubmissionTime < b.LastSubmissionTime
 		}
@@ -399,15 +415,7 @@ func AssignRanks(p []participantSummary) {
 	}
 }
 
-func sortParticipantsForRanking(p []participantSummary) {
-	SortParticipantsForRanking(p)
-}
-
-func assignRanks(p []participantSummary) {
-	AssignRanks(p)
-}
-
-func (s *RankingStore) ConsolidateContest(ctx context.Context, contestID string, regradeMCQs bool) (*dto.ConsolidationResponse, error) {
+func (s *RankingStore) ConsolidateContest(ctx context.Context, contestID string, regradeMCQs bool, force bool) (*dto.ConsolidationResponse, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("ranking store: db is not initialized")
 	}
@@ -432,7 +440,13 @@ func (s *RankingStore) ConsolidateContest(ctx context.Context, contestID string,
 		return nil, fmt.Errorf("acquire advisory lock: %w", err)
 	}
 
-	// 2. Ensure ranking rows exist for all registered participants and users with submissions.
+	// 2. Grade MCQs FIRST (locks submissions before rankings, matching JudgeMCQ/ProcessFinal order).
+	mcqsGraded, err := s.gradeContestMCQsTx(ctx, tx, contestID, regradeMCQs)
+	if err != nil {
+		return nil, fmt.Errorf("grade MCQs: %w", err)
+	}
+
+	// 3. Ensure ranking rows exist for all registered participants and users with submissions.
 	const ensureRankingsQ = `
 		INSERT INTO rankings (contest_id, user_id)
 		SELECT $1, u.user_id FROM (
@@ -446,24 +460,22 @@ func (s *RankingStore) ConsolidateContest(ctx context.Context, contestID string,
 		return nil, fmt.Errorf("ensure ranking rows: %w", err)
 	}
 
-	// 3. Lock rankings rows in deterministic user_id order to serialize with JudgeMCQ and code scoring.
+	// 4. Lock rankings rows in deterministic user_id order.
 	if _, err := tx.ExecContext(ctx, `SELECT user_id FROM rankings WHERE contest_id = $1 ORDER BY user_id FOR UPDATE`, contestID); err != nil {
 		return nil, fmt.Errorf("lock rankings: %w", err)
 	}
 
-	// 4. Count pending code submissions for response reporting.
+	// 5. Count pending code submissions.
 	var pendingCodeSubmissions int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM submissions WHERE contest_id = $1 AND type = 'code' AND status = 'pending'`, contestID).Scan(&pendingCodeSubmissions); err != nil {
 		return nil, fmt.Errorf("count pending code submissions: %w", err)
 	}
 
-	// 5. Grade MCQs within the transaction, ordering updates deterministically by submission ID.
-	mcqsGraded, err := s.gradeContestMCQsTx(ctx, tx, contestID, regradeMCQs)
-	if err != nil {
-		return nil, fmt.Errorf("grade MCQs: %w", err)
+	if !force && pendingCodeSubmissions > 0 {
+		return nil, common.ErrPendingSubmissionsExist
 	}
 
-	// 6. Compute and save ranks within the transaction, ordering upserts by user ID.
+	// 6. Compute and save ranks within the transaction via set-based upsert.
 	rankedCount, err := s.computeAndSaveRanksTx(ctx, tx, contestID)
 	if err != nil {
 		return nil, fmt.Errorf("compute and save ranks: %w", err)
@@ -471,11 +483,6 @@ func (s *RankingStore) ConsolidateContest(ctx context.Context, contestID string,
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit consolidation: %w", err)
-	}
-
-	// 7. Refresh materialized view outside the transaction so failures do not abort the committed data.
-	if _, err := s.db.ExecContext(ctx, `REFRESH MATERIALIZED VIEW ranking_mv`); err != nil {
-		log.Printf("ranking-store: warning refreshing ranking_mv: %v", err)
 	}
 
 	s.InvalidateCache(contestID)
@@ -500,7 +507,7 @@ func (s *RankingStore) gradeContestMCQsTx(ctx context.Context, tx *sql.Tx, conte
 	if !regrade {
 		query += ` AND sub.status = 'pending'`
 	}
-	query += ` ORDER BY sub.id ASC`
+	query += ` ORDER BY sub.id ASC FOR UPDATE OF sub`
 
 	rows, err := tx.QueryContext(ctx, query, contestID)
 	if err != nil {
@@ -534,16 +541,21 @@ func (s *RankingStore) gradeContestMCQsTx(ctx context.Context, tx *sql.Tx, conte
 		return 0, nil
 	}
 
-	stmt, err := tx.PrepareContext(ctx, `UPDATE submissions SET status = $2 WHERE id = $1`)
-	if err != nil {
-		return 0, fmt.Errorf("prepare MCQ status update: %w", err)
+	subIDs := make([]string, len(results))
+	statuses := make([]string, len(results))
+	for i, res := range results {
+		subIDs[i] = res.id
+		statuses[i] = string(res.status)
 	}
-	defer stmt.Close()
 
-	for _, res := range results {
-		if _, err := stmt.ExecContext(ctx, res.id, res.status); err != nil {
-			return 0, fmt.Errorf("update submission %s: %w", res.id, err)
-		}
+	const batchUpdateMCQ = `
+		UPDATE submissions s
+		SET status = t.status::submission_status
+		FROM unnest($1::text[], $2::text[]) AS t(id, status)
+		WHERE s.id = t.id
+	`
+	if _, err := tx.ExecContext(ctx, batchUpdateMCQ, pq.Array(subIDs), pq.Array(statuses)); err != nil {
+		return 0, fmt.Errorf("batch update MCQ submissions: %w", err)
 	}
 
 	return len(results), nil
@@ -735,12 +747,45 @@ func (s *RankingStore) computeAndSaveRanksTx(ctx context.Context, tx *sql.Tx, co
 		})
 	}
 
-	sortParticipantsForRanking(participants)
-	assignRanks(participants)
+	SortParticipantsForRanking(participants)
+	AssignRanks(participants)
 
-	const upsertRankQ = `
+	n := len(participants)
+	userIDs := make([]string, n)
+	scores := make([]int, n)
+	ranks := make([]int, n)
+	hiddens := make([]bool, n)
+	disqualifieds := make([]bool, n)
+	shortlisteds := make([]bool, n)
+
+	for i, p := range participants {
+		userIDs[i] = p.UserID
+		scores[i] = p.TotalScore
+		ranks[i] = p.Rank
+		hiddens[i] = p.Hidden
+		disqualifieds[i] = p.Disqualified
+		shortlisteds[i] = p.Shortlisted
+	}
+
+	const batchUpsertRankQ = `
 		INSERT INTO rankings (contest_id, user_id, score, rank, hidden, disqualified, shortlisted)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		SELECT 
+			$1, 
+			t.user_id, 
+			t.score, 
+			t.rank, 
+			t.hidden, 
+			t.disqualified, 
+			t.shortlisted
+		FROM unnest(
+			$2::text[], 
+			$3::int[], 
+			$4::int[], 
+			$5::boolean[], 
+			$6::boolean[], 
+			$7::boolean[]
+		) AS t(user_id, score, rank, hidden, disqualified, shortlisted)
+		ORDER BY t.user_id ASC
 		ON CONFLICT (contest_id, user_id)
 		DO UPDATE SET 
 			score = EXCLUDED.score,
@@ -750,23 +795,8 @@ func (s *RankingStore) computeAndSaveRanksTx(ctx context.Context, tx *sql.Tx, co
 			shortlisted = rankings.shortlisted
 	`
 
-	stmt, err := tx.PrepareContext(ctx, upsertRankQ)
-	if err != nil {
-		return 0, fmt.Errorf("prepare upsert: %w", err)
-	}
-	defer stmt.Close()
-
-	// Order upserts by UserID ascending to serialize and avoid deadlocks
-	upsertList := make([]participantSummary, len(participants))
-	copy(upsertList, participants)
-	sort.Slice(upsertList, func(i, j int) bool {
-		return upsertList[i].UserID < upsertList[j].UserID
-	})
-
-	for _, p := range upsertList {
-		if _, err := stmt.ExecContext(ctx, contestID, p.UserID, p.TotalScore, p.Rank, p.Hidden, p.Disqualified, p.Shortlisted); err != nil {
-			return 0, fmt.Errorf("upsert ranking for user %s: %w", p.UserID, err)
-		}
+	if _, err := tx.ExecContext(ctx, batchUpsertRankQ, contestID, pq.Array(userIDs), pq.Array(scores), pq.Array(ranks), pq.Array(hiddens), pq.Array(disqualifieds), pq.Array(shortlisteds)); err != nil {
+		return 0, fmt.Errorf("batch upsert rankings: %w", err)
 	}
 
 	return len(participants), nil

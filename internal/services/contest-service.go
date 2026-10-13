@@ -506,9 +506,20 @@ func (cs *ContestService) checkProblemEditable(ctx context.Context, contestID st
 	return nil
 }
 
-func (cs *ContestService) ConsolidateContest(ctx context.Context, contestID string, regradeMCQs bool) (*dto.ConsolidationResponse, error) {
+func (cs *ContestService) ConsolidateContest(ctx context.Context, contestID string, regradeMCQs bool, force bool) (*dto.ConsolidationResponse, error) {
 	if cs == nil || cs.stores == nil || cs.stores.Rankings == nil {
 		return nil, fmt.Errorf("contest service: ranking store not initialized")
 	}
-	return cs.stores.Rankings.ConsolidateContest(ctx, contestID, regradeMCQs)
+
+	if !force && cs.stores.Contests != nil {
+		contest, err := cs.stores.Contests.GetContest(ctx, contestID)
+		if err != nil {
+			return nil, err
+		}
+		if contest.GetRunningStatus() != models.ContestRunningClosed {
+			return nil, common.ErrContestNotClosed
+		}
+	}
+
+	return cs.stores.Rankings.ConsolidateContest(ctx, contestID, regradeMCQs, force)
 }

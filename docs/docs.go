@@ -349,6 +349,12 @@ const docTemplate = `{
                         "description": "Re-grade already graded MCQs",
                         "name": "regrade",
                         "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Force consolidation even if contest is open or has pending submissions",
+                        "name": "force",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -387,6 +393,15 @@ const docTemplate = `{
                     },
                     "404": {
                         "description": "Contest not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict - Contest not closed or pending submissions exist",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {

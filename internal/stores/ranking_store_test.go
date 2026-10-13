@@ -146,10 +146,10 @@ func TestConsolidatorTieBreakingAndRanking(t *testing.T) {
 	}
 
 	// Sort using the consolidator's comparator
-	sortParticipantsForRanking(participants)
+	SortParticipantsForRanking(participants)
 
 	// Assign ranks using consolidator ranking algorithm
-	assignRanks(participants)
+	AssignRanks(participants)
 
 	// Expected order:
 	// Rank 1: u_more_solves (Score: 100, Solves: 3)
@@ -197,12 +197,12 @@ func TestConsolidatorIdempotency(t *testing.T) {
 	}
 
 	run1 := genParticipants()
-	sortParticipantsForRanking(run1)
-	assignRanks(run1)
+	SortParticipantsForRanking(run1)
+	AssignRanks(run1)
 
 	run2 := genParticipants()
-	sortParticipantsForRanking(run2)
-	assignRanks(run2)
+	SortParticipantsForRanking(run2)
+	AssignRanks(run2)
 
 	if len(run1) != len(run2) {
 		t.Fatalf("length mismatch: %d vs %d", len(run1), len(run2))

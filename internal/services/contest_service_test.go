@@ -77,14 +77,14 @@ func TestProblemEditWindow(t *testing.T) {
 }
 
 type serviceRankingTestStore struct {
-	consolidateFunc func(ctx context.Context, contestID string, regrade bool) (*dto.ConsolidationResponse, error)
+	consolidateFunc func(ctx context.Context, contestID string, regrade bool, force bool) (*dto.ConsolidationResponse, error)
 	updateFunc      func(ctx context.Context, contestID, userID string, req *dto.UpdateLeaderboardUserRequest) error
 	leaderboardFunc func(ctx context.Context, contestID string, page int) (*dto.GetLeaderboardResponse, error)
 }
 
-func (s serviceRankingTestStore) ConsolidateContest(ctx context.Context, contestID string, regrade bool) (*dto.ConsolidationResponse, error) {
+func (s serviceRankingTestStore) ConsolidateContest(ctx context.Context, contestID string, regrade bool, force bool) (*dto.ConsolidationResponse, error) {
 	if s.consolidateFunc != nil {
-		return s.consolidateFunc(ctx, contestID, regrade)
+		return s.consolidateFunc(ctx, contestID, regrade, force)
 	}
 	return nil, nil
 }
@@ -108,7 +108,7 @@ func (s serviceRankingTestStore) InvalidateCache(contestID string) {}
 func TestConsolidateContestService(t *testing.T) {
 	t.Run("nil ranking store error", func(t *testing.T) {
 		svc := NewContestService(&stores.Storage{}, nil)
-		_, err := svc.ConsolidateContest(context.Background(), "c1", false)
+		_, err := svc.ConsolidateContest(context.Background(), "c1", false, false)
 		if err == nil {
 			t.Fatal("expected error with nil ranking store")
 		}
@@ -117,21 +117,54 @@ func TestConsolidateContestService(t *testing.T) {
 	t.Run("delegates to ranking store", func(t *testing.T) {
 		called := false
 		rankStore := serviceRankingTestStore{
-			consolidateFunc: func(_ context.Context, cid string, regrade bool) (*dto.ConsolidationResponse, error) {
+			consolidateFunc: func(_ context.Context, cid string, regrade bool, force bool) (*dto.ConsolidationResponse, error) {
 				called = true
-				if cid != "c123" || !regrade {
-					t.Errorf("unexpected args: cid=%s, regrade=%v", cid, regrade)
+				if cid != "c123" || !regrade || !force {
+					t.Errorf("unexpected args: cid=%s, regrade=%v, force=%v", cid, regrade, force)
 				}
 				return &dto.ConsolidationResponse{ContestID: cid, Status: "success"}, nil
 			},
 		}
 		svc := NewContestService(&stores.Storage{Rankings: rankStore}, nil)
-		res, err := svc.ConsolidateContest(context.Background(), "c123", true)
+		res, err := svc.ConsolidateContest(context.Background(), "c123", true, true)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !called || res == nil || res.Status != "success" {
 			t.Errorf("unexpected result: called=%v, res=%+v", called, res)
+		}
+	})
+
+	t.Run("fails when contest is running and force is false", func(t *testing.T) {
+		now := time.Now().UnixMilli()
+		storage := &stores.Storage{
+			Contests: problemContestTestStore{start: now - 60_000, end: now + 60_000},
+			Rankings: serviceRankingTestStore{},
+		}
+		svc := NewContestService(storage, nil)
+		_, err := svc.ConsolidateContest(context.Background(), "c123", false, false)
+		if !errors.Is(err, common.ErrContestNotClosed) {
+			t.Errorf("expected ErrContestNotClosed, got %v", err)
+		}
+	})
+
+	t.Run("succeeds when contest is running and force is true", func(t *testing.T) {
+		now := time.Now().UnixMilli()
+		called := false
+		rankStore := serviceRankingTestStore{
+			consolidateFunc: func(_ context.Context, cid string, regrade bool, force bool) (*dto.ConsolidationResponse, error) {
+				called = true
+				return &dto.ConsolidationResponse{ContestID: cid, Status: "success"}, nil
+			},
+		}
+		storage := &stores.Storage{
+			Contests: problemContestTestStore{start: now - 60_000, end: now + 60_000},
+			Rankings: rankStore,
+		}
+		svc := NewContestService(storage, nil)
+		res, err := svc.ConsolidateContest(context.Background(), "c123", false, true)
+		if err != nil || !called || res == nil {
+			t.Fatalf("unexpected error or uncalled: %v", err)
 		}
 	})
 }
