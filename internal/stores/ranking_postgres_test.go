@@ -183,6 +183,47 @@ func TestConsolidationConcurrentWithJudgeMCQPostgres(t *testing.T) {
 	}
 }
 
+func TestConsolidatedLeaderboardTieOrderPostgres(t *testing.T) {
+	db := postgresTestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	user, contest, problem, submission, executions := executionFixture(t, db, 1)
+	other := user + "-later"
+	if _, err := db.ExecContext(ctx, `UPDATE users SET name='Zebra' WHERE id=$1`, user); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO users(id,name,email,usn,current_year,department) VALUES($1,'Alpha',$2,$1,1,'CS')`, other, other+"@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	otherSubmission, otherExecutions := executionSubmission(t, db, other, contest, problem, 1)
+	if _, err := db.ExecContext(ctx, `UPDATE submissions SET created_at=100 WHERE id IN ($1,$2)`, submission, otherSubmission); err != nil {
+		t.Fatal(err)
+	}
+	for _, execution := range []models.Execution{executions[0], otherExecutions[0]} {
+		if err := stores.NewExecutionStore(db).ProcessFinal(ctx, stores.FinalExecutionResult{ExecutionID: execution.ID, Status: "accepted"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rankingStore := stores.NewRankingStore(db)
+	if _, err := rankingStore.ConsolidateContest(ctx, contest, false, false); err != nil {
+		t.Fatal(err)
+	}
+	leaderboard, err := rankingStore.GetLeaderboard(ctx, contest, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leaderboard.Entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(leaderboard.Entries))
+	}
+	for i, userID := range []string{user, other} {
+		if entry := leaderboard.Entries[i]; entry.UserID != userID || entry.Rank != 1 {
+			t.Errorf("entry %d: got user %s rank %d, want user %s rank 1", i, entry.UserID, entry.Rank, userID)
+		}
+	}
+}
+
 func TestConsolidatedLeaderboardRankZeroOrderingPostgres(t *testing.T) {
 	db := postgresTestDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

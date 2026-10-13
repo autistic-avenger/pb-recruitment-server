@@ -209,7 +209,7 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 		WHERE r.contest_id = $1
 		AND r.hidden = false
 		AND r.disqualified = false
-		ORDER BY 1 ASC, u.name ASC, r.user_id ASC
+		ORDER BY 1 ASC, r.user_id ASC
 		LIMIT $2 OFFSET $3
 	`
 	}
