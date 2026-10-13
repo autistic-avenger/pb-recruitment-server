@@ -31,3 +31,12 @@ type GetLeaderboardResponse struct {
 	TotalPages int                `json:"total_pages"`
 	TotalCount int                `json:"total_count"`
 }
+
+type ConsolidationResponse struct {
+	ContestID          string `json:"contest_id"`
+	MCQsGraded         int    `json:"mcqs_graded"`
+	ParticipantsRanked int    `json:"participants_ranked"`
+	PendingSubmissions int    `json:"pending_submissions"`
+	ProcessedAt        int64  `json:"processed_at"`
+	Status             string `json:"status"`
+}

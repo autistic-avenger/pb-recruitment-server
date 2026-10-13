@@ -321,6 +321,106 @@ const docTemplate = `{
                 }
             }
         },
+        "/admin/contest/{id}/consolidate": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Grade MCQs, combine with coding results, compute and save ranks at contest end",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Admin - Leaderboard"
+                ],
+                "summary": "Consolidate contest rankings (Admin)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Contest ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Re-grade already graded MCQs",
+                        "name": "regrade",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Force consolidation even if contest is open or has pending submissions",
+                        "name": "force",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/app_internal_models_dto.ConsolidationResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Contest ID is required",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden - Admin access required",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Contest not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict - Contest not closed or pending submissions exist",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/admin/contests/list": {
             "get": {
                 "security": [
@@ -2316,6 +2416,29 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "usn": {
+                    "type": "string"
+                }
+            }
+        },
+        "app_internal_models_dto.ConsolidationResponse": {
+            "type": "object",
+            "properties": {
+                "contest_id": {
+                    "type": "string"
+                },
+                "mcqs_graded": {
+                    "type": "integer"
+                },
+                "participants_ranked": {
+                    "type": "integer"
+                },
+                "pending_submissions": {
+                    "type": "integer"
+                },
+                "processed_at": {
+                    "type": "integer"
+                },
+                "status": {
                     "type": "string"
                 }
             }

@@ -7,6 +7,7 @@ import (
 	"app/internal/services"
 	"app/internal/stores"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -116,6 +117,173 @@ func TestProblemInvalidAnswerResponse(t *testing.T) {
 			}
 		})
 	}
+}
+
+type mockRankingStore struct {
+	consolidateFunc func(ctx context.Context, contestID string, regrade bool, force bool) (*dto.ConsolidationResponse, error)
+	updateFunc      func(ctx context.Context, contestID, userID string, req *dto.UpdateLeaderboardUserRequest) error
+	leaderboardFunc func(ctx context.Context, contestID string, page int) (*dto.GetLeaderboardResponse, error)
+}
+
+func (m *mockRankingStore) ConsolidateContest(ctx context.Context, contestID string, regrade bool, force bool) (*dto.ConsolidationResponse, error) {
+	if m.consolidateFunc != nil {
+		return m.consolidateFunc(ctx, contestID, regrade, force)
+	}
+	return nil, nil
+}
+
+func (m *mockRankingStore) UpdateLeaderboardUser(ctx context.Context, contestID, userID string, req *dto.UpdateLeaderboardUserRequest) error {
+	if m.updateFunc != nil {
+		return m.updateFunc(ctx, contestID, userID, req)
+	}
+	return nil
+}
+
+func (m *mockRankingStore) GetLeaderboard(ctx context.Context, contestID string, page int) (*dto.GetLeaderboardResponse, error) {
+	if m.leaderboardFunc != nil {
+		return m.leaderboardFunc(ctx, contestID, page)
+	}
+	return nil, nil
+}
+
+func (m *mockRankingStore) InvalidateCache(contestID string) {}
+
+func TestHandleConsolidateContest(t *testing.T) {
+	t.Run("success with regrade", func(t *testing.T) {
+		var calledContestID string
+		var calledRegrade bool
+		var calledForce bool
+		rankStore := &mockRankingStore{
+			consolidateFunc: func(_ context.Context, contestID string, regrade bool, force bool) (*dto.ConsolidationResponse, error) {
+				calledContestID = contestID
+				calledRegrade = regrade
+				calledForce = force
+				return &dto.ConsolidationResponse{
+					ContestID:          contestID,
+					MCQsGraded:         3,
+					ParticipantsRanked: 10,
+					ProcessedAt:        123456789,
+					Status:             "success",
+				}, nil
+			},
+		}
+		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil))
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/admin/contest/cid-123/consolidate?regrade=true&force=true", nil)
+		ctx := echo.New().NewContext(req, recorder)
+		ctx.SetParamNames("id")
+		ctx.SetParamValues("cid-123")
+
+		if err := controller.HandleConsolidateContest(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("HTTP %d, want 200", recorder.Code)
+		}
+		if calledContestID != "cid-123" || !calledRegrade || !calledForce {
+			t.Errorf("called with %s, regrade=%v, force=%v; want cid-123, true, true", calledContestID, calledRegrade, calledForce)
+		}
+		if !strings.Contains(recorder.Body.String(), `"status":"success"`) {
+			t.Errorf("unexpected body: %s", recorder.Body.String())
+		}
+	})
+
+	t.Run("missing contest id", func(t *testing.T) {
+		controller := NewContestController(services.NewContestService(nil, nil))
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/admin/contest//consolidate", nil)
+		ctx := echo.New().NewContext(req, recorder)
+		if err := controller.HandleConsolidateContest(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("HTTP %d, want 400", recorder.Code)
+		}
+	})
+
+	t.Run("contest not found", func(t *testing.T) {
+		rankStore := &mockRankingStore{
+			consolidateFunc: func(_ context.Context, _ string, _ bool, _ bool) (*dto.ConsolidationResponse, error) {
+				return nil, common.ContestNotFoundError
+			},
+		}
+		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil))
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/admin/contest/missing/consolidate", nil)
+		ctx := echo.New().NewContext(req, recorder)
+		ctx.SetParamNames("id")
+		ctx.SetParamValues("missing")
+
+		if err := controller.HandleConsolidateContest(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("HTTP %d, want 404", recorder.Code)
+		}
+	})
+
+	t.Run("conflict contest not closed", func(t *testing.T) {
+		rankStore := &mockRankingStore{
+			consolidateFunc: func(_ context.Context, _ string, _ bool, _ bool) (*dto.ConsolidationResponse, error) {
+				return nil, common.ErrContestNotClosed
+			},
+		}
+		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil))
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/admin/contest/cid-123/consolidate", nil)
+		ctx := echo.New().NewContext(req, recorder)
+		ctx.SetParamNames("id")
+		ctx.SetParamValues("cid-123")
+
+		if err := controller.HandleConsolidateContest(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("HTTP %d, want 409", recorder.Code)
+		}
+	})
+
+	t.Run("conflict pending submissions", func(t *testing.T) {
+		rankStore := &mockRankingStore{
+			consolidateFunc: func(_ context.Context, _ string, _ bool, _ bool) (*dto.ConsolidationResponse, error) {
+				return nil, common.ErrPendingSubmissionsExist
+			},
+		}
+		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil))
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/admin/contest/cid-123/consolidate", nil)
+		ctx := echo.New().NewContext(req, recorder)
+		ctx.SetParamNames("id")
+		ctx.SetParamValues("cid-123")
+
+		if err := controller.HandleConsolidateContest(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("HTTP %d, want 409", recorder.Code)
+		}
+	})
+
+	t.Run("internal server error", func(t *testing.T) {
+		rankStore := &mockRankingStore{
+			consolidateFunc: func(_ context.Context, _ string, _ bool, _ bool) (*dto.ConsolidationResponse, error) {
+				return nil, errors.New("db query failed")
+			},
+		}
+		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil))
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/admin/contest/cid-123/consolidate", nil)
+		ctx := echo.New().NewContext(req, recorder)
+		ctx.SetParamNames("id")
+		ctx.SetParamValues("cid-123")
+
+		if err := controller.HandleConsolidateContest(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if recorder.Code != http.StatusInternalServerError {
+			t.Fatalf("HTTP %d, want 500", recorder.Code)
+		}
+	})
 }
 
 type visibilityProblemStore struct {
