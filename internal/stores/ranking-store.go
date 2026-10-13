@@ -202,14 +202,14 @@ func (s *RankingStore) GetLeaderboard(ctx context.Context, contestID string, pag
 	`
 	if isConsolidated {
 		entriesQ = `
-		SELECT r.rank, r.user_id, u.name, u.usn, r.score
+		SELECT RANK() OVER (ORDER BY r.rank = 0, r.rank) AS rank, r.user_id, u.name, u.usn, r.score
 		FROM rankings r
 		INNER JOIN users u 
 		ON r.user_id = u.id
 		WHERE r.contest_id = $1
 		AND r.hidden = false
 		AND r.disqualified = false
-		ORDER BY r.rank ASC, u.name ASC, r.user_id ASC
+		ORDER BY 1 ASC, u.name ASC, r.user_id ASC
 		LIMIT $2 OFFSET $3
 	`
 	}

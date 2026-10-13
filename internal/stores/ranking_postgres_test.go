@@ -182,3 +182,62 @@ func TestConsolidationConcurrentWithJudgeMCQPostgres(t *testing.T) {
 		t.Fatalf("expected final score 10, got %d (lost update detected)", finalScore)
 	}
 }
+
+func TestConsolidatedLeaderboardRankZeroOrderingPostgres(t *testing.T) {
+	db := postgresTestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	user1, user2, userHidden, user4, userUnranked := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	contest := uuid.NewString()
+
+	for _, u := range []string{user1, user2, userHidden, user4, userUnranked} {
+		if _, err := db.ExecContext(ctx, `INSERT INTO users(id,name,email,usn,current_year,department) VALUES($1,'Ranking user',$2,$1,1,'CS')`, u, u+"@example.test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	now := time.Now().UnixMilli()
+	if _, err := db.ExecContext(ctx, `INSERT INTO contests(id,name,description,registration_start_time,registration_end_time,start_time,end_time) VALUES($1,'Ranking Contest','',1,$2,$3,$2)`, contest, now+3_600_000, now-3_600_000); err != nil {
+		t.Fatal(err)
+	}
+
+	// user1: rank 1
+	// user2: rank 2 (tied)
+	// userHidden: rank 3 (hidden = true, should not create a gap for visible users)
+	// user4: rank 4 (next visible after tied rank 2, should be rank 3 if hidden excluded or preserved rank)
+	// userUnranked: rank 0 (reinstated / added after consolidation, should sort last)
+	if _, err := db.ExecContext(ctx, `INSERT INTO rankings(contest_id, user_id, score, rank, hidden, disqualified) VALUES 
+		($1, $2, 100, 1, false, false), 
+		($1, $3, 50, 2, false, false), 
+		($1, $4, 40, 3, true, false), 
+		($1, $5, 30, 4, false, false), 
+		($1, $6, 10, 0, false, false)`, contest, user1, user2, userHidden, user4, userUnranked); err != nil {
+		t.Fatal(err)
+	}
+
+	rankingStore := stores.NewRankingStore(db)
+	lb, err := rankingStore.GetLeaderboard(ctx, contest, 0)
+	if err != nil {
+		t.Fatalf("GetLeaderboard failed: %v", err)
+	}
+
+	if len(lb.Entries) != 4 {
+		t.Fatalf("expected 4 visible entries, got %d", len(lb.Entries))
+	}
+
+	// Verify order: user1 (rank 1), user2 (rank 2), user4 (rank 3 because hidden user doesn't leave gap), userUnranked (rank 4 at bottom)
+	if lb.Entries[0].UserID != user1 || lb.Entries[0].Rank != 1 {
+		t.Errorf("entry 0: expected user1 rank 1, got user %s rank %d", lb.Entries[0].UserID, lb.Entries[0].Rank)
+	}
+	if lb.Entries[1].UserID != user2 || lb.Entries[1].Rank != 2 {
+		t.Errorf("entry 1: expected user2 rank 2, got user %s rank %d", lb.Entries[1].UserID, lb.Entries[1].Rank)
+	}
+	if lb.Entries[2].UserID != user4 || lb.Entries[2].Rank != 3 {
+		t.Errorf("entry 2: expected user4 rank 3 (no hidden gap), got user %s rank %d", lb.Entries[2].UserID, lb.Entries[2].Rank)
+	}
+	if lb.Entries[3].UserID != userUnranked || lb.Entries[3].Rank != 4 {
+		t.Errorf("entry 3: expected userUnranked at the bottom with rank 4, got user %s rank %d", lb.Entries[3].UserID, lb.Entries[3].Rank)
+	}
+}
+

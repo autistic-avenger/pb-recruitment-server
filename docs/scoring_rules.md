@@ -81,6 +81,8 @@ When two or more candidates achieve the same total score, ties are broken strict
   - Candidates marked as `disqualified = true` are placed at the bottom of the rankings and assigned `rank = 0` (or excluded from the public leaderboard).
 - **Hidden Participants**:
   - Candidates marked as `hidden = true` remain stored in `rankings` but are excluded from public leaderboard views.
+- **Unranked / Rank-0 Participants**:
+  - Participants with `rank = 0` (such as unranked entries created after consolidation or disqualified participants) sort to the bottom of the leaderboard after all officially ranked participants.
 
 ---
 
