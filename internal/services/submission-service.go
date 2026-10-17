@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -24,13 +25,9 @@ import (
 )
 
 type SubmissionService struct {
-	stores             *stores.Storage
-	s3                 *s3.S3
-	judge0             *judge0.Client
-	recoveryCursorTime int64
-	recoveryCursorID   string
-	recoveryIdleSince  time.Time
-	cursorMu           sync.Mutex
+	stores *stores.Storage
+	s3     *s3.S3
+	judge0 *judge0.Client
 }
 
 func NewSubmissionService(stores *stores.Storage, s3 *s3.S3, judge0Client *judge0.Client) *SubmissionService {
@@ -79,13 +76,6 @@ func (ss *SubmissionService) CheckRateLimit(ctx context.Context, userID string) 
 		}
 	}
 
-	return ss.stores.Submissions.CheckSubmissionRateLimit(ctx, userID, cooldown)
-}
-
-func (ss *SubmissionService) CheckRateLimitWithCooldown(ctx context.Context, userID string, cooldown int64) error {
-	if ss == nil || ss.stores == nil || ss.stores.Submissions == nil {
-		return nil
-	}
 	return ss.stores.Submissions.CheckSubmissionRateLimit(ctx, userID, cooldown)
 }
 
@@ -166,33 +156,21 @@ func (ss *SubmissionService) CreateSubmission(ctx context.Context, userID string
 		indexes[i] = i
 	}
 
-	executions, err := ss.stores.Executions.InsertBatch(ctx, submissionID, indexes)
+	cpuLimit, memLimit := judgeLimits(problem.TimeLimit, problem.MemoryLimit)
+	compilerOptions := judge0.CompilerOptions(languageID)
+	jobs := make([]judge0.SubmissionRequest, len(inputs))
+	for i := range inputs {
+		jobs[i] = judge0.SubmissionRequest{
+			SourceCode: source, LanguageID: languageID, Stdin: inputs[i], ExpectedOutput: &outputs[i],
+			CPUTimeLimit: cpuLimit, MemoryLimit: memLimit, CompilerOptions: compilerOptions,
+		}
+	}
+	executions, err := ss.stores.Executions.InsertBatch(ctx, submissionID, indexes, jobs)
 	if err != nil {
 		return "", ss.markSubmissionFailed(ctx, submissionID, err)
 	}
-
-	cpuLimit := float64(problem.TimeLimit) / 1000.0
-	if cpuLimit <= 0 {
-		cpuLimit = 1
-	}
-	memLimit := float64(problem.MemoryLimit) * 1024
-	if memLimit <= 0 {
-		memLimit = 256 * 1024
-	}
-
-	compilerOptions := judge0.CompilerOptions(languageID)
-	jobs := make([]judge0.SubmissionRequest, len(executions))
 	for i, exec := range executions {
-		jobs[i] = judge0.SubmissionRequest{
-			SourceCode:      source,
-			LanguageID:      languageID,
-			Stdin:           inputs[i],
-			ExpectedOutput:  outputs[i],
-			CPUTimeLimit:    cpuLimit,
-			MemoryLimit:     memLimit,
-			CallbackURL:     ss.judge0.CallbackURL(exec.ID),
-			CompilerOptions: compilerOptions,
-		}
+		jobs[i].CallbackURL = ss.judge0.CallbackURL(exec.ID, exec.Attempt)
 	}
 
 	dispatchCtx, cancelDispatch := context.WithTimeout(context.WithoutCancel(ctx), ss.judge0.Timeout())
@@ -203,40 +181,21 @@ func (ss *SubmissionService) CreateSubmission(ctx context.Context, userID string
 		log.Errorf("judge0 batch failed for submission %s: %v", submissionID, err)
 	}
 
-	tokens, failedIDs := classifyDispatchResults(executions, results)
-
 	dbCtx, cancelDB := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancelDB()
-
-	if len(tokens) > 0 {
-		if saveErr := ss.stores.Executions.SaveTokens(dbCtx, tokens); saveErr != nil {
-			log.Errorf("save judge0 tokens for submission %s: %v", submissionID, saveErr)
-			if !ss.judge0.CallbacksEnabled() {
-				for id := range tokens {
-					failedIDs = append(failedIDs, id)
-				}
-			}
+	for i, exec := range executions {
+		if i >= len(results) {
+			continue
 		}
-	}
-
-	if ss.judge0.CallbacksEnabled() {
-		refusedIDs := make([]string, 0)
-		for i, exec := range executions {
-			if i < len(results) && results[i].Error != nil {
-				if errors.Is(results[i].Error, judge0.ErrDispatchRejected) {
-					refusedIDs = append(refusedIDs, exec.ID)
-				}
+		result := results[i]
+		if result.Token != "" {
+			if err := ss.stores.Executions.SaveAttemptToken(dbCtx, exec.ID, exec.Attempt, result.Token); err != nil {
+				log.Errorf("save Judge0 token for execution %s: %v", exec.ID, err)
 			}
-		}
-		failedIDs = refusedIDs
-	}
-
-	if len(failedIDs) > 0 {
-		failureCtx, cancelFailure := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancelFailure()
-		if markErr := ss.stores.Executions.MarkFailed(failureCtx, failedIDs); markErr != nil {
-			log.Errorf("mark failed executions for submission %s: %v", submissionID, markErr)
-			return "", markErr
+		} else if errors.Is(result.Error, judge0.ErrDispatchRejected) {
+			if err := ss.stores.Executions.ProcessFinal(dbCtx, stores.FinalExecutionResult{ExecutionID: exec.ID, Attempt: exec.Attempt, Status: "judge_error"}); err != nil {
+				return "", err
+			}
 		}
 	}
 
@@ -244,31 +203,35 @@ func (ss *SubmissionService) CreateSubmission(ctx context.Context, userID string
 
 }
 
-func (ss *SubmissionService) HandleJudge0Callback(ctx context.Context, executionID string, payload judge0.CallbackResult) error {
+func (ss *SubmissionService) HandleJudge0Callback(ctx context.Context, executionID string, payload judge0.SubmissionStatusResponse) error {
 	status, final := mapJudgeStatus(payload.Status.ID)
 	if !final {
 		if payload.Token == "" {
 			return fmt.Errorf("missing Judge0 token")
 		}
-		return ss.stores.Executions.SaveTokens(ctx, map[string]string{executionID: payload.Token})
+		return ss.stores.Executions.SaveAttemptToken(ctx, executionID, payload.Attempt, payload.Token)
 	}
-	runtime, err := judgeRuntimeMillis(payload.Time)
+	result, err := finalJudgeResult(executionID, status, payload)
 	if err != nil {
 		return err
+	}
+	return ss.stores.Executions.ProcessFinal(ctx, result)
+}
+
+func finalJudgeResult(executionID, status string, payload judge0.SubmissionStatusResponse) (stores.FinalExecutionResult, error) {
+	runtime, err := judgeRuntimeMillis(payload.Time)
+	if err != nil {
+		return stores.FinalExecutionResult{}, err
 	}
 	memory := int64(0)
 	if payload.Memory != nil {
 		memory = *payload.Memory
 	}
-	return ss.stores.Executions.ProcessFinal(ctx, stores.FinalExecutionResult{
-		ExecutionID:   executionID,
-		Token:         payload.Token,
-		Status:        status,
-		Runtime:       runtime,
-		Memory:        memory,
-		CompileOutput: judgeOutputText(payload.CompileOutput),
-		Stderr:        judgeOutputText(payload.Stderr),
-	})
+	return stores.FinalExecutionResult{
+		ExecutionID: executionID, Attempt: payload.Attempt, Token: payload.Token, Status: status,
+		Stdout: payload.Stdout, Runtime: runtime, Memory: memory,
+		CompileOutput: judgeOutputText(payload.CompileOutput), Stderr: judgeOutputText(payload.Stderr),
+	}, nil
 }
 
 const judgeOutputLimit = 4096
@@ -347,131 +310,230 @@ func judgeRuntimeMillis(raw json.RawMessage) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if seconds < 0 {
+	if seconds < 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds >= float64(math.MaxInt64)/1000 {
 		return 0, fmt.Errorf("negative Judge0 runtime")
 	}
 	return int64(seconds*1000 + 0.5), nil
 }
 
+const maxJudgeRetries = 3
+
+func judgeLimits(milliseconds, mebibytes int) (float64, float64) {
+	cpu, memory := float64(milliseconds)/1000, float64(mebibytes)*1024
+	if cpu <= 0 {
+		cpu = 1
+	}
+	if memory <= 0 {
+		memory = 256 * 1024
+	}
+	return cpu, memory
+}
+
 func (ss *SubmissionService) RecoverJudge0(ctx context.Context) {
-	if !ss.cursorMu.TryLock() {
-		return
-	}
-	defer ss.cursorMu.Unlock()
-
 	if ss.stores.Submissions != nil {
-		orphans, orphanErr := ss.stores.Submissions.PendingCodeWithoutExecutions(ctx, time.Now().Unix()-10, 50)
-		if orphanErr != nil {
-			log.Errorf("judge0 recovery list unprepared submissions failed: %v", orphanErr)
-		} else {
-			for _, id := range orphans {
-				if err := ss.stores.Submissions.MarkFailed(ctx, id); err != nil {
-					log.Errorf("judge0 recovery fail unprepared submission %s: %v", id, err)
-				}
-			}
-		}
-	}
-
-	observedAt := time.Now()
-	workerCtx, cancelWorkers := context.WithTimeout(ctx, ss.judge0.Timeout())
-	idle, workerErr := ss.judge0.WorkersIdle(workerCtx)
-	cancelWorkers()
-	cutoff := int64(0)
-	if workerErr != nil || !idle {
-		ss.recoveryIdleSince = time.Time{}
-		if workerErr != nil {
-			log.Errorf("judge0 recovery worker observation failed: %v", workerErr)
-		}
-	} else if ss.recoveryIdleSince.IsZero() {
-		ss.recoveryIdleSince = observedAt
-	} else if observedAt.Sub(ss.recoveryIdleSince) >= 15*time.Second {
-		// shortcut: two idle sweeps plus a dispatch margin; revisit if Judge0 adds delayed retries.
-		cutoff = ss.recoveryIdleSince.Unix() - 30
-		ss.recoveryIdleSince = observedAt
-	}
-	if cutoff > 0 {
-		staleIDs, err := ss.stores.Executions.PendingTokenlessBefore(ctx, cutoff, 50)
+		orphans, err := ss.stores.Submissions.PendingCodeWithoutExecutions(ctx, time.Now().Unix()-30, 50)
 		if err != nil {
-			log.Errorf("judge0 recovery list abandoned tokenless failed: %v", err)
-		} else if len(staleIDs) > 0 {
-			if err := ss.stores.Executions.MarkFailed(ctx, staleIDs); err != nil {
-				log.Errorf("judge0 recovery cleanup abandoned tokenless failed: %v", err)
+			log.Errorf("list unprepared submissions: %v", err)
+		}
+		for _, id := range orphans {
+			if err := ss.stores.Submissions.MarkFailed(ctx, id); err != nil {
+				log.Errorf("fail unprepared submission: %v", err)
 			}
 		}
 	}
-
 	completed, err := ss.stores.Executions.TerminalPendingParents(ctx, 50)
 	if err != nil {
-		log.Errorf("judge0 recovery reconcile failed: %v", err)
-	} else {
-		for _, result := range completed {
-			if ctx.Err() != nil {
-				return
-			}
-			if e := ss.stores.Executions.ProcessFinal(ctx, result); e != nil {
-				log.Errorf("judge0 recovery reconcile result failed: %v", e)
-			}
+		log.Errorf("reconcile Judge0 parents: %v", err)
+	}
+	for _, result := range completed {
+		if err := ss.stores.Executions.ProcessFinal(ctx, result); err != nil {
+			log.Errorf("reconcile Judge0 result: %v", err)
 		}
 	}
-
-	for ctx.Err() == nil {
-		items, err := ss.stores.Executions.PendingWithTokens(ctx, 50, ss.recoveryCursorTime, ss.recoveryCursorID)
-		if err != nil {
-			log.Errorf("judge0 recovery list failed: %v", err)
-			return
-		}
-
-		if len(items) == 0 {
-			ss.recoveryCursorTime = 0
-			ss.recoveryCursorID = ""
-			return
-		}
-
-		for start := 0; start < len(items); start += ss.judge0.BatchSize() {
-			if ctx.Err() != nil {
-				log.Warnf("judge0 recovery context timeout, breaking early")
-				break
+	// Slow tokenless dispatches must not delay polling healthy jobs.
+	var workers sync.WaitGroup
+	for _, withToken := range []bool{true, false} {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			limit := 1
+			if withToken {
+				limit = ss.judge0.BatchSize()
 			}
-			callCtx, cancel := context.WithTimeout(ctx, ss.judge0.Timeout())
-			end := min(start+ss.judge0.BatchSize(), len(items))
-			page := items[start:end]
-			tokens := make([]string, len(page))
-			for i, item := range page {
-				tokens[i] = item.Judge0Token
-			}
-			results, e := ss.judge0.GetSubmissions(callCtx, tokens)
-			cancel()
-			if e != nil {
-				// Failed batches advance so unavailable tokens cannot starve later jobs.
-				last := page[len(page)-1]
-				ss.recoveryCursorTime, ss.recoveryCursorID = last.CreatedAt, last.ID
-				log.Errorf("judge0 recovery result fetch failed: %v", e)
-				continue
-			}
-			for i, item := range page {
-				if ctx.Err() != nil {
+			for ctx.Err() == nil {
+				items, err := ss.stores.Executions.ClaimRecovery(ctx, limit, withToken)
+				if err != nil {
+					log.Errorf("claim Judge0 recovery: %v", err)
 					return
 				}
-				ss.recoveryCursorTime, ss.recoveryCursorID = item.CreatedAt, item.ID
-				result := results[i]
-				if result == nil || (cutoff > 0 && item.CreatedAt < cutoff && result.Status.ID <= 2) {
-					if e = ss.stores.Executions.ProcessFinal(ctx, stores.FinalExecutionResult{ExecutionID: item.ID, Token: item.Judge0Token, Status: "judge_error"}); e != nil {
-						log.Errorf("judge0 recovery abandoned job finalization failed: %v", e)
-					}
-					continue
+				if len(items) == 0 {
+					return
 				}
-				_, final := mapJudgeStatus(result.Status.ID)
-				if !final {
-					continue
-				}
-				payload := judge0.CallbackResult{Token: result.Token, Time: result.Time, Memory: result.Memory, CompileOutput: result.CompileOutput, Stderr: result.Stderr}
-				payload.Status.ID = result.Status.ID
-				if e = ss.HandleJudge0Callback(ctx, item.ID, payload); e != nil {
-					log.Errorf("judge0 recovery result failed: %v", e)
-				}
+				ss.recoverBatch(ctx, items)
+			}
+		}()
+	}
+	workers.Wait()
+}
+
+func (ss *SubmissionService) recoverBatch(ctx context.Context, items []models.Execution) {
+	// Leave five seconds for releases before the thirty-second claims expire.
+	workCtx, cancelWork := context.WithTimeout(ctx, 20*time.Second)
+	defer cancelWork()
+	var results []*judge0.SubmissionStatusResponse
+	var fetchErr error
+	if items[0].Judge0Token != "" {
+		tokens := make([]string, len(items))
+		for i, e := range items {
+			tokens[i] = e.Judge0Token
+		}
+		callCtx, cancelCall := context.WithTimeout(workCtx, ss.judge0.Timeout())
+		results, fetchErr = ss.judge0.GetSubmissions(callCtx, tokens)
+		cancelCall()
+	}
+	healthy := make([]bool, len(items))
+	for i, result := range results {
+		// A healthy observation remains healthy if shutdown prevents applying it.
+		healthy[i] = fetchErr == nil && result != nil && result.Status.ID < 13
+	}
+	var batch sync.WaitGroup
+	for i, e := range items {
+		batch.Add(1)
+		go func(i int, e models.Execution) {
+			defer batch.Done()
+			if workCtx.Err() != nil {
+				return
+			}
+			var result *judge0.SubmissionStatusResponse
+			if i < len(results) {
+				result = results[i]
+			}
+			var err error
+			healthy[i], err = ss.recoverExecution(workCtx, e, result, fetchErr)
+			if err != nil {
+				log.Errorf("recover execution %s: %v", e.ID, err)
+			}
+		}(i, e)
+	}
+	batch.Wait()
+	dbCtx, cancelDB := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancelDB()
+	if err := ss.stores.Executions.ReleaseRecovery(dbCtx, items, healthy); err != nil {
+		log.Errorf("release recovery: %v", err)
+	}
+}
+
+func (ss *SubmissionService) recoverExecution(ctx context.Context, e models.Execution, result *judge0.SubmissionStatusResponse, fetchErr error) (bool, error) {
+	finalize := func(status string) error {
+		return ss.stores.Executions.ProcessFinal(ctx, stores.FinalExecutionResult{ExecutionID: e.ID, Attempt: e.Attempt, Claim: e.Claim, Token: e.Judge0Token, Status: status})
+	}
+	callCtx, cancel := context.WithTimeout(ctx, ss.judge0.Timeout())
+	defer cancel()
+	if e.Judge0Token == "" {
+		if e.DispatchCount > maxJudgeRetries {
+			return false, finalize("judge_error")
+		}
+		job, err := ss.recoveryJob(callCtx, e)
+		if err != nil {
+			return false, err
+		}
+		// shortcut: a lost response and delayed callback can duplicate execution; use provider idempotency if CPU duplication becomes unacceptable.
+		return ss.dispatchRecovery(callCtx, e, job)
+	}
+	if fetchErr != nil || result == nil || result.Status.ID >= 13 {
+		if e.RecoveryFailures >= maxJudgeRetries {
+			return false, finalize("judge_error")
+		}
+		return false, fetchErr
+	}
+	status, final := mapJudgeStatus(result.Status.ID)
+	// A real queued/running job is not evidence of abandonment.
+	if !final {
+		return true, nil
+	}
+	if status == "wrong_answer" {
+		var err error
+		// Non-null stdout rules out the defect without loading legacy inputs.
+		if len(e.DispatchPayload) == 0 {
+			result.Stdout, err = ss.judge0.GetSubmissionStdout(callCtx, e.Judge0Token)
+		}
+		if err == nil && (len(e.DispatchPayload) > 0 || strings.TrimSpace(string(result.Stdout)) == "null") {
+			var job judge0.SubmissionRequest
+			job, err = ss.recoveryJob(callCtx, e)
+			if err == nil && len(result.Stdout) == 0 && job.ExpectedOutput != nil && strings.Trim(*job.ExpectedOutput, " \t\n\r\v\f\x00") == "" {
+				result.Stdout, err = ss.judge0.GetSubmissionStdout(callCtx, e.Judge0Token)
 			}
 		}
+		if err != nil {
+			if e.RecoveryFailures >= maxJudgeRetries {
+				return false, finalize("judge_error")
+			}
+			return false, err
+		}
 	}
+	finalResult, err := finalJudgeResult(e.ID, status, *result)
+	if err != nil {
+		if e.RecoveryFailures >= maxJudgeRetries {
+			return false, finalize("judge_error")
+		}
+		return false, err
+	}
+	finalResult.Attempt, finalResult.Claim = e.Attempt, e.Claim
+	return true, ss.stores.Executions.ProcessFinal(ctx, finalResult)
+}
+
+func (ss *SubmissionService) dispatchRecovery(ctx context.Context, e models.Execution, job judge0.SubmissionRequest) (bool, error) {
+	job.CallbackURL = ss.judge0.CallbackURL(e.ID, e.Attempt)
+	results, err := ss.judge0.CreateBatch(ctx, []judge0.SubmissionRequest{job})
+	dbCtx, cancelDB := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancelDB()
+	if len(results) == 1 && results[0].Token != "" {
+		return true, ss.stores.Executions.SaveAttemptToken(dbCtx, e.ID, e.Attempt, results[0].Token)
+	}
+	if len(results) == 1 && errors.Is(results[0].Error, judge0.ErrDispatchRejected) {
+		return false, ss.stores.Executions.ProcessFinal(dbCtx, stores.FinalExecutionResult{ExecutionID: e.ID, Attempt: e.Attempt, Claim: e.Claim, Token: e.Judge0Token, Status: "judge_error"})
+	}
+	return false, err
+}
+
+func (ss *SubmissionService) recoveryJob(ctx context.Context, e models.Execution) (judge0.SubmissionRequest, error) {
+	var job judge0.SubmissionRequest
+	if len(e.DispatchPayload) > 0 {
+		if err := json.Unmarshal(e.DispatchPayload, &job); err != nil {
+			return job, err
+		}
+	} else {
+		// Legacy rows and crashes before execution preparation have no snapshot yet.
+		sub, err := ss.GetSubmissionDetailsByID(ctx, e.SubmissionID)
+		if err != nil {
+			return job, err
+		}
+		problem, err := ss.stores.Problems.GetProblem(ctx, sub.ProblemID, sub.ContestID)
+		if err != nil {
+			return job, err
+		}
+		inputs, outputs, err := ss.loadTestcases(ctx, sub.ContestID, sub.ProblemID, problem.TestcasesKey)
+		if err != nil {
+			return job, err
+		}
+		if e.TestCaseIndex < 0 || e.TestCaseIndex >= len(inputs) {
+			return job, common.ErrNoTestcases
+		}
+		source, err := decodeSource(sub.Code)
+		if err != nil {
+			return job, err
+		}
+		language, err := judge0.LanguageID(sub.Language)
+		if err != nil {
+			return job, err
+		}
+		cpu, memory := judgeLimits(problem.TimeLimit, problem.MemoryLimit)
+		job = judge0.SubmissionRequest{SourceCode: source, LanguageID: language, Stdin: inputs[e.TestCaseIndex], ExpectedOutput: &outputs[e.TestCaseIndex], CPUTimeLimit: cpu, MemoryLimit: memory, CompilerOptions: judge0.CompilerOptions(language)}
+		if err := ss.stores.Executions.SaveRecoveryPayload(ctx, e, job); err != nil {
+			return job, err
+		}
+	}
+	return job, nil
 }
 
 func NewJudge0Recovery(lc fx.Lifecycle, ss *SubmissionService) {
@@ -565,23 +627,13 @@ func decodeSource(code string) (string, error) {
 		return "", common.ErrInvalidCode
 	}
 	decoded, err := base64.StdEncoding.DecodeString(trimmed)
-	if err != nil {
-		return code, nil
+	if err == nil {
+		code = string(decoded)
 	}
-	return string(decoded), nil
-}
-
-func classifyDispatchResults(executions []models.Execution, results []judge0.SubmissionResult) (map[string]string, []string) {
-	tokens := map[string]string{}
-	failedIDs := make([]string, 0)
-	for i, exec := range executions {
-		if i < len(results) && results[i].Error == nil && results[i].Token != "" {
-			tokens[exec.ID] = results[i].Token
-		} else {
-			failedIDs = append(failedIDs, exec.ID)
-		}
+	if !utf8.ValidString(code) {
+		return "", common.ErrInvalidCode
 	}
-	return tokens, failedIDs
+	return code, nil
 }
 
 func mapObjectReadError(err error) error {

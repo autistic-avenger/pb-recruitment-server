@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,8 +23,6 @@ import (
 	"github.com/labstack/gommon/log"
 )
 
-var ErrDispatchRejected = fmt.Errorf("Judge0 explicitly rejected dispatch")
-
 type Client struct {
 	baseURL        string
 	authToken      string
@@ -34,6 +33,9 @@ type Client struct {
 
 // Dispatch leaves ten seconds for DB bookkeeping within the browser's thirty-second timeout.
 const maxDispatchTimeout = 10 * time.Second
+
+// shortcut: covers two stock Judge0 4 MiB files with Base64/JSON; raise if provider file limits grow.
+const maxResultBytesPerSubmission = 12 << 20
 
 func NewClient() *Client {
 	callbackBase, callbackSecret := strings.TrimRight(os.Getenv("JUDGE0_CALLBACK_BASE_URL"), "/"), os.Getenv("JUDGE0_CALLBACK_SECRET")
@@ -65,30 +67,36 @@ func (c *Client) Timeout() time.Duration {
 	return min(c.httpClient.Timeout, maxDispatchTimeout)
 }
 
-func (c *Client) CallbackURL(executionID string) string {
+func (c *Client) CallbackURL(executionID string, attempt ...string) string {
 	if c.callbackBase == "" || c.callbackSecret == "" {
 		return ""
 	}
-	sig := c.CallbackSignature(executionID)
-	return fmt.Sprintf("%s/internal/judge0/callback/%s?sig=%s", c.callbackBase, executionID, sig)
+	query := url.Values{"sig": {c.CallbackSignature(executionID, attempt...)}}
+	if len(attempt) > 0 && attempt[0] != "" {
+		query.Set("attempt", attempt[0])
+	}
+	return fmt.Sprintf("%s/internal/judge0/callback/%s?%s", c.callbackBase, executionID, query.Encode())
 }
 
 func (c *Client) CallbacksEnabled() bool {
 	return c != nil && c.callbackBase != "" && c.callbackSecret != ""
 }
-func (c *Client) CallbackSignature(id string) string {
+func (c *Client) CallbackSignature(id string, attempt ...string) string {
 	if parsed, err := uuid.Parse(id); err == nil {
 		id = parsed.String()
+	}
+	if len(attempt) > 0 && attempt[0] != "" {
+		id += "/" + attempt[0]
 	}
 	m := hmac.New(sha256.New, []byte(c.callbackSecret))
 	_, _ = m.Write([]byte(id))
 	return hex.EncodeToString(m.Sum(nil))
 }
-func (c *Client) VerifyCallback(id, signature string) bool {
+func (c *Client) VerifyCallback(id, signature string, attempt ...string) bool {
 	if c == nil || c.callbackSecret == "" {
 		return false
 	}
-	want, err := hex.DecodeString(c.CallbackSignature(id))
+	want, err := hex.DecodeString(c.CallbackSignature(id, attempt...))
 	got, gotErr := hex.DecodeString(signature)
 	return err == nil && gotErr == nil && hmac.Equal(want, got)
 }
@@ -110,7 +118,6 @@ func (c *Client) CreateBatch(ctx context.Context, jobs []SubmissionRequest) ([]S
 	if len(jobs) == 0 {
 		return []SubmissionResult{}, nil
 	}
-
 	results := make([]SubmissionResult, len(jobs))
 	if c.baseURL == "" {
 		err := fmt.Errorf("%w: JUDGE0_URL is not set", ErrDispatchRejected)
@@ -132,7 +139,11 @@ func (c *Client) CreateBatch(ctx context.Context, jobs []SubmissionRequest) ([]S
 		if err != nil {
 			for i := start; i < len(jobs); i++ {
 				if results[i].Token == "" && results[i].Error == nil {
-					results[i] = SubmissionResult{Error: err}
+					failure := err
+					if i >= end { // Later chunks never reached Judge0.
+						failure = ErrDispatchNotSent
+					}
+					results[i] = SubmissionResult{Error: failure}
 				}
 			}
 			return results, err
@@ -145,13 +156,29 @@ func (c *Client) CreateBatch(ctx context.Context, jobs []SubmissionRequest) ([]S
 }
 
 func (c *Client) GetSubmissions(ctx context.Context, tokens []string) ([]*SubmissionStatusResponse, error) {
+	// Stdout is only needed to verify Judge0's blank-output Wrong Answer defect.
+	return c.getSubmissions(ctx, tokens, "token,time,memory,status,compile_output,stderr")
+}
+
+func (c *Client) GetSubmissionStdout(ctx context.Context, token string) (json.RawMessage, error) {
+	results, err := c.getSubmissions(ctx, []string{token}, "token,status,stdout")
+	if err != nil {
+		return nil, err
+	}
+	if results[0] == nil || results[0].Status.ID != 4 || len(results[0].Stdout) == 0 {
+		return nil, ErrInvalidResponse
+	}
+	return results[0].Stdout, nil
+}
+
+func (c *Client) getSubmissions(ctx context.Context, tokens []string, fields string) ([]*SubmissionStatusResponse, error) {
 	if len(tokens) == 0 {
 		return nil, nil
 	}
 	if c.baseURL == "" {
 		return nil, fmt.Errorf("%w: JUDGE0_URL is not set", ErrUnavailable)
 	}
-	query := url.Values{"tokens": {strings.Join(tokens, ",")}, "base64_encoded": {"true"}, "fields": {"token,time,memory,status,compile_output,stderr"}}
+	query := url.Values{"tokens": {strings.Join(tokens, ",")}, "base64_encoded": {"true"}, "fields": {fields}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/submissions/batch?"+query.Encode(), nil)
 	if err != nil {
 		return nil, err
@@ -161,7 +188,7 @@ func (c *Client) GetSubmissions(ctx context.Context, tokens []string) ([]*Submis
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, ErrUnavailable
+		return nil, errors.Join(ErrUnavailable, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -170,7 +197,8 @@ func (c *Client) GetSubmissions(ctx context.Context, tokens []string) ([]*Submis
 	var out struct {
 		Submissions []*SubmissionStatusResponse `json:"submissions"`
 	}
-	if err = json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	// Keep the response bound proportional to the requested batch.
+	if err = json.NewDecoder(io.LimitReader(resp.Body, int64(len(tokens))*maxResultBytesPerSubmission)).Decode(&out); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
 	}
 	if len(out.Submissions) != len(tokens) {
@@ -184,56 +212,25 @@ func (c *Client) GetSubmissions(ctx context.Context, tokens []string) ([]*Submis
 	return out.Submissions, nil
 }
 
-func (c *Client) WorkersIdle(ctx context.Context) (bool, error) {
-	if c.baseURL == "" {
-		return false, ErrUnavailable
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/workers", nil)
-	if err != nil {
-		return false, err
-	}
-	if c.authToken != "" {
-		req.Header.Set("X-Auth-Token", c.authToken)
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return false, ErrUnavailable
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("%w: workers status %d", ErrUnavailable, resp.StatusCode)
-	}
-	var queues []struct {
-		Queue     string `json:"queue"`
-		Size      *int   `json:"size"`
-		Working   *int   `json:"working"`
-		Available *int   `json:"available"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&queues); err != nil || len(queues) == 0 {
-		return false, ErrInvalidResponse
-	}
-	idle := true
-	for _, queue := range queues {
-		if queue.Queue == "" || queue.Size == nil || queue.Working == nil || queue.Available == nil || *queue.Size < 0 || *queue.Working < 0 || *queue.Available < *queue.Working {
-			return false, ErrInvalidResponse
-		}
-		if *queue.Available == 0 {
-			return false, fmt.Errorf("%w: %q", ErrNoWorkers, queue.Queue)
-		}
-		idle = idle && *queue.Size == 0 && *queue.Working == 0
-	}
-	return idle, nil
-}
-
 func (c *Client) postBatch(ctx context.Context, jobs []SubmissionRequest) ([]SubmissionResult, error) {
+	encoded := make([]SubmissionRequest, len(jobs))
+	for i, job := range jobs {
+		job.SourceCode = base64.StdEncoding.EncodeToString([]byte(job.SourceCode))
+		job.Stdin = base64.StdEncoding.EncodeToString([]byte(job.Stdin))
+		if job.ExpectedOutput != nil {
+			output := base64.StdEncoding.EncodeToString([]byte(*job.ExpectedOutput))
+			job.ExpectedOutput = &output
+		}
+		encoded[i] = job
+	}
 	payload, err := json.Marshal(map[string][]SubmissionRequest{
-		"submissions": jobs,
+		"submissions": encoded,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/submissions/batch?base64_encoded=false", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/submissions/batch?base64_encoded=true", bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid Judge0 URL", ErrDispatchRejected)
 	}
@@ -248,39 +245,53 @@ func (c *Client) postBatch(ctx context.Context, jobs []SubmissionRequest) ([]Sub
 		if errors.As(err, &dialErr) && dialErr.Op == "dial" {
 			return nil, fmt.Errorf("%w: %v", ErrDispatchRejected, err)
 		}
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		failure := ErrUnavailable
-		// Judge0 rejects a full queue with 503 before creating any jobs.
-		if (resp.StatusCode >= 400 && resp.StatusCode < 500) || resp.StatusCode == http.StatusServiceUnavailable {
+		// A proxy's 503 is ambiguous; only Judge0's explicit queue rejection is definitive.
+		if (resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusRequestTimeout) ||
+			(resp.StatusCode == http.StatusServiceUnavailable && bytes.Equal(bytes.TrimSpace(body), []byte(`{"error":"queue is full"}`))) {
 			failure = ErrDispatchRejected
 		}
 		return nil, fmt.Errorf("%w: status %d: %s", failure, resp.StatusCode, string(body))
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 
-	var tokens []batchTokenResponse
-	if err := json.Unmarshal(body, &tokens); err != nil {
+	var entries []json.RawMessage
+	if err := json.Unmarshal(body, &entries); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
 	}
 
 	results := make([]SubmissionResult, len(jobs))
 	for i := range jobs {
-		if i >= len(tokens) {
+		if i >= len(entries) {
 			results[i] = SubmissionResult{Error: ErrInvalidResponse}
 			continue
 		}
-		if tokens[i].Token == "" {
-			results[i] = SubmissionResult{Error: ErrDispatchRejected}
+		var token batchTokenResponse
+		if err := json.Unmarshal(entries[i], &token); err != nil {
+			results[i] = SubmissionResult{Error: ErrInvalidResponse}
 			continue
 		}
-		results[i] = SubmissionResult{Token: tokens[i].Token}
+		if token.Token == "" {
+			var validation map[string]json.RawMessage
+			_ = json.Unmarshal(entries[i], &validation)
+			failure := ErrInvalidResponse
+			for key, value := range validation {
+				if key != "token" && len(value) > 0 && value[0] == '[' {
+					failure = ErrDispatchRejected
+				}
+			}
+			results[i] = SubmissionResult{Error: failure}
+			continue
+		}
+		results[i] = SubmissionResult{Token: token.Token}
 	}
 	return results, nil
 }

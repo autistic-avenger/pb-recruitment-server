@@ -65,12 +65,12 @@ func (s problemTestStore) GetProblem(ctx context.Context, problemID, contestID s
 
 type executionTestStore struct {
 	*stores.ExecutionStore
-	saveTokens  func(context.Context, map[string]string) error
-	markFailed  func(context.Context, []string) error
-	insertBatch func(context.Context) error
+	saveToken    func(context.Context, string, string, string) error
+	processFinal func(context.Context, stores.FinalExecutionResult) error
+	insertBatch  func(context.Context) error
 }
 
-func (s executionTestStore) InsertBatch(ctx context.Context, _ string, _ []int) ([]models.Execution, error) {
+func (s executionTestStore) InsertBatch(ctx context.Context, _ string, _ []int, jobs ...[]judge0.SubmissionRequest) ([]models.Execution, error) {
 	if s.insertBatch != nil {
 		if err := s.insertBatch(ctx); err != nil {
 			return nil, err
@@ -79,49 +79,36 @@ func (s executionTestStore) InsertBatch(ctx context.Context, _ string, _ []int) 
 	return []models.Execution{{ID: "execution"}}, nil
 }
 
-func (s executionTestStore) SaveTokens(ctx context.Context, tokens map[string]string) error {
-	return s.saveTokens(ctx, tokens)
+func (s executionTestStore) SaveAttemptToken(ctx context.Context, id, attempt, token string) error {
+	return s.saveToken(ctx, id, attempt, token)
 }
-
-func (s executionTestStore) MarkFailed(ctx context.Context, ids []string) error {
-	return s.markFailed(ctx, ids)
+func (s executionTestStore) ProcessFinal(ctx context.Context, r stores.FinalExecutionResult) error {
+	return s.processFinal(ctx, r)
 }
 
 func TestCreateSubmissionFailureBookkeeping(t *testing.T) {
 	writeErr := errors.New("failure status write failed")
 	for _, tc := range []struct {
-		name              string
-		timeoutSave       bool
-		markErr           error
-		failUpload        bool
-		failInsert        bool
-		callbacksEnabled  bool
-		networkFailure    bool
-		bodyFailure       bool
-		invalidBody       bool
-		missingTokens     bool
-		serverFailure     bool
-		queueFull         bool
-		validationError   bool
-		refusedConnection bool
-		unsetURL          bool
+		name             string
+		status           int
+		body             string
+		timeoutSave      bool
+		markErr          error
+		failUpload       bool
+		failInsert       bool
+		callbacksEnabled bool
+		ambiguous        bool
 	}{
-		{name: "token save timeout", timeoutSave: true},
-		{name: "failure status write error", markErr: writeErr},
+		{name: "token save timeout", status: 201, body: `[{"token":"token"}]`, timeoutSave: true},
+		{name: "failure status write error", status: 422, markErr: writeErr},
+		{name: "ambiguous failure without callbacks", status: 504, ambiguous: true},
 		{name: "code upload failure", failUpload: true},
 		{name: "execution insertion failure", failInsert: true},
 		{name: "preparation cleanup failure", failInsert: true, markErr: writeErr},
-		{name: "callbacks enabled token save timeout", callbacksEnabled: true, timeoutSave: true},
-		{name: "callbacks enabled network failure", callbacksEnabled: true, networkFailure: true},
-		{name: "callbacks enabled body failure", callbacksEnabled: true, bodyFailure: true},
-		{name: "callbacks enabled explicit rejection", callbacksEnabled: true},
-		{name: "callbacks enabled invalid body", callbacksEnabled: true, invalidBody: true},
-		{name: "callbacks enabled missing tokens", callbacksEnabled: true, missingTokens: true},
-		{name: "callbacks enabled server failure", callbacksEnabled: true, serverFailure: true},
-		{name: "callbacks enabled queue full", callbacksEnabled: true, queueFull: true},
-		{name: "callbacks enabled per-entry validation error", callbacksEnabled: true, validationError: true},
-		{name: "callbacks enabled connection refused", callbacksEnabled: true, refusedConnection: true},
-		{name: "callbacks enabled unset URL", callbacksEnabled: true, unsetURL: true},
+		{name: "ambiguous failure with callbacks", status: 504, callbacksEnabled: true, ambiguous: true},
+		{name: "missing token response", status: 201, body: `[]`, ambiguous: true},
+		{name: "explicit rejection with callbacks", status: 422, callbacksEnabled: true},
+		{name: "per-entry rejection", status: 201, body: `[{"memory_limit":["exceeds maximum"]}]`, callbacksEnabled: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			objects := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -151,10 +138,16 @@ func TestCreateSubmissionFailureBookkeeping(t *testing.T) {
 			judge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if tc.failUpload || tc.failInsert {
 					t.Error("dispatch must not run after preparation failure")
+					return
 				}
 				var payload struct {
 					Submissions []struct {
-						EnableNetwork *bool `json:"enable_network"`
+						EnableNetwork  *bool   `json:"enable_network"`
+						SourceCode     string  `json:"source_code"`
+						Stdin          string  `json:"stdin"`
+						ExpectedOutput string  `json:"expected_output"`
+						CPUTimeLimit   float64 `json:"cpu_time_limit"`
+						MemoryLimit    float64 `json:"memory_limit"`
 					} `json:"submissions"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || len(payload.Submissions) != 1 {
@@ -162,56 +155,19 @@ func TestCreateSubmissionFailureBookkeeping(t *testing.T) {
 				} else if enabled := payload.Submissions[0].EnableNetwork; enabled == nil || *enabled {
 					t.Error("dispatch must explicitly disable network access")
 				}
-				if tc.networkFailure {
-					conn, _, err := w.(http.Hijacker).Hijack()
-					if err != nil {
-						t.Error(err)
-						return
+				if len(payload.Submissions) == 1 {
+					job := payload.Submissions[0]
+					source, decodeErr := base64.StdEncoding.DecodeString(job.SourceCode)
+					if decodeErr != nil || string(source) != "int main(){}" || job.CPUTimeLimit != 1 || job.MemoryLimit != 262144 || job.Stdin != "MQ==" || job.ExpectedOutput != "MQ==" {
+						t.Errorf("source decoded twice or incorrect Judge0 units/payload: %+v source=%q error=%v", job, source, decodeErr)
 					}
-					conn.Close()
-					return
 				}
-				if tc.bodyFailure {
-					w.Header().Set("Content-Length", "1000")
-					w.WriteHeader(http.StatusCreated)
-					w.Write([]byte(`[{"token":"`))
-					return
-				}
-				if tc.invalidBody || tc.missingTokens || tc.validationError {
-					w.WriteHeader(http.StatusCreated)
-					if tc.invalidBody {
-						w.Write([]byte(`[{`))
-					} else if tc.validationError {
-						w.Write([]byte(`[{"memory_limit":["exceeds maximum"]}]`))
-					} else {
-						w.Write([]byte(`[]`))
-					}
-					return
-				}
-				if tc.serverFailure {
-					w.WriteHeader(http.StatusInternalServerError)
-					return
-				}
-				if tc.queueFull {
-					w.WriteHeader(http.StatusServiceUnavailable)
-					w.Write([]byte(`{"error":"queue is full"}`))
-					return
-				}
-				if tc.timeoutSave {
-					w.WriteHeader(http.StatusCreated)
-					w.Write([]byte(`[{"token":"token"}]`))
-				} else {
-					w.WriteHeader(http.StatusUnprocessableEntity)
-				}
+
+				w.WriteHeader(tc.status)
+				w.Write([]byte(tc.body))
 			}))
 			defer judge.Close()
 			t.Setenv("JUDGE0_URL", judge.URL)
-			if tc.refusedConnection {
-				judge.Close()
-			}
-			if tc.unsetURL {
-				t.Setenv("JUDGE0_URL", "")
-			}
 			t.Setenv("JUDGE0_AUTH_TOKEN", "")
 			t.Setenv("JUDGE0_CALLBACK_BASE_URL", "")
 			t.Setenv("JUDGE0_CALLBACK_SECRET", "")
@@ -260,21 +216,21 @@ func TestCreateSubmissionFailureBookkeeping(t *testing.T) {
 						}
 						return nil
 					},
-					saveTokens: func(ctx context.Context, tokens map[string]string) error {
-						if !tc.timeoutSave || tokens["execution"] != "token" {
+					saveToken: func(ctx context.Context, id, attempt, token string) error {
+						if !tc.timeoutSave || id != "execution" || token != "token" {
 							t.Fatal("unexpected token save")
 						}
 						cancel()
 						<-ctx.Done()
 						return ctx.Err()
 					},
-					markFailed: func(ctx context.Context, ids []string) error {
+					processFinal: func(ctx context.Context, result stores.FinalExecutionResult) error {
 						marked = true
 						if err := checkContext(ctx); err != nil {
 							return err
 						}
-						if len(ids) != 1 || ids[0] != "execution" {
-							t.Errorf("failed execution IDs = %v", ids)
+						if result.ExecutionID != "execution" || result.Status != "judge_error" {
+							t.Errorf("failed execution = %+v", result)
 						}
 						return tc.markErr
 					},
@@ -285,7 +241,7 @@ func TestCreateSubmissionFailureBookkeeping(t *testing.T) {
 				ContestID: "contest", ProblemID: "problem", Language: "cpp",
 				Code: base64.StdEncoding.EncodeToString([]byte("int main(){}")),
 			})
-			wantMarked := !(tc.callbacksEnabled && (tc.timeoutSave || tc.networkFailure || tc.bodyFailure || tc.invalidBody || tc.missingTokens || tc.serverFailure))
+			wantMarked := !tc.timeoutSave && !tc.ambiguous
 			if marked != wantMarked {
 				t.Errorf("immediate failure bookkeeping = %v, want %v", marked, wantMarked)
 			}
@@ -424,26 +380,15 @@ func TestSubmissionServiceRateLimit(t *testing.T) {
 	}
 	svc := NewSubmissionService(storage, nil, nil)
 
-	// Normal user passes
-	if err := svc.CheckRateLimitWithCooldown(context.Background(), "alice", 10); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if checkedUser != "alice" || checkedCooldown != 10 {
-		t.Errorf("checkedUser=%s, checkedCooldown=%d", checkedUser, checkedCooldown)
-	}
-
-	// Spammer rejected
-	if err := svc.CheckRateLimitWithCooldown(context.Background(), "spammer", 5); !errors.Is(err, common.ErrRateLimitExceeded) {
-		t.Fatalf("expected ErrRateLimitExceeded, got %v", err)
-	}
-
-	// Environment variable fallback
 	t.Setenv("SUBMISSION_RATE_LIMIT_SECONDS", "7")
 	if err := svc.CheckRateLimit(context.Background(), "bob"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if checkedCooldown != 7 {
-		t.Errorf("expected cooldown from env to be 7, got %d", checkedCooldown)
+	if checkedUser != "bob" || checkedCooldown != 7 {
+		t.Errorf("checkedUser=%s, checkedCooldown=%d", checkedUser, checkedCooldown)
+	}
+	if err := svc.CheckRateLimit(context.Background(), "spammer"); !errors.Is(err, common.ErrRateLimitExceeded) {
+		t.Fatalf("expected ErrRateLimitExceeded, got %v", err)
 	}
 }
 
@@ -545,3 +490,37 @@ func TestCreateSubmissionValidationBeforeRateLimit(t *testing.T) {
 	}
 }
 
+func TestDecodeSourcePreservesUTF8(t *testing.T) {
+	source := "print('नमस्ते')\n"
+	for _, tc := range []struct {
+		name, code, want string
+		invalid          bool
+	}{
+		{"plain Unicode", source, source, false},
+		{"encoded Unicode", base64.StdEncoding.EncodeToString([]byte(source)), source, false},
+		{"encoded invalid UTF8", base64.StdEncoding.EncodeToString([]byte{'/', '/', ' ', 0xff}), "", true},
+		{"plain invalid UTF8", string([]byte{'/', '/', ' ', 0xff}), "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := decodeSource(tc.code)
+			if tc.invalid {
+				if !errors.Is(err, common.ErrInvalidCode) {
+					t.Fatalf("non-UTF8 source can change during snapshotting: %q %v", got, err)
+				}
+			} else if err != nil || got != tc.want {
+				t.Fatal(got, err)
+			}
+		})
+	}
+}
+
+func TestCreateSubmissionRejectsInvalidUTF8BeforePreparation(t *testing.T) {
+	service := NewSubmissionService(&stores.Storage{Problems: problemTestStore{}}, nil, nil)
+	id, err := service.CreateSubmission(context.Background(), "user", models.Code, &dto.SubmitSubmissionRequest{
+		ContestID: "contest", ProblemID: "problem", Language: "cpp",
+		Code: base64.StdEncoding.EncodeToString([]byte{'/', '/', ' ', 0xff}),
+	})
+	if id != "" || !errors.Is(err, common.ErrInvalidCode) {
+		t.Fatal("invalid source reached preparation", id, err)
+	}
+}

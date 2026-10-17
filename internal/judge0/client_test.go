@@ -2,11 +2,15 @@ package judge0
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -21,8 +25,9 @@ func TestBatchRejections(t *testing.T) {
 		{"queue full", 503, `{"error":"queue is full"}`, []error{ErrDispatchRejected, ErrDispatchRejected}},
 		{"invalid request", 422, `[{"memory_limit":["exceeds maximum"]}]`, []error{ErrDispatchRejected, ErrDispatchRejected}},
 		{"mixed validation", 201, `[{"token":"accepted"},{"memory_limit":["exceeds maximum"]}]`, []error{nil, ErrDispatchRejected}},
-		{"empty entry", 201, `[{"token":"accepted"},{}]`, []error{nil, ErrDispatchRejected}},
+		{"empty entry", 201, `[{"token":"accepted"},{}]`, []error{nil, ErrInvalidResponse}},
 		{"missing entry", 201, `[{"token":"accepted"}]`, []error{nil, ErrInvalidResponse}},
+		{"malformed response", 201, `[{`, []error{ErrInvalidResponse, ErrInvalidResponse}},
 		{"internal error", 500, `{}`, []error{ErrUnavailable, ErrUnavailable}},
 		{"bad gateway", 502, `{}`, []error{ErrUnavailable, ErrUnavailable}},
 		{"gateway timeout", 504, `{}`, []error{ErrUnavailable, ErrUnavailable}},
@@ -45,6 +50,26 @@ func TestBatchRejections(t *testing.T) {
 				}
 				if want == nil && results[i].Token != "accepted" {
 					t.Errorf("accepted token lost: %+v", results[i])
+				}
+			}
+		})
+	}
+}
+
+func TestUnsentDispatchIsRejected(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	server.Close()
+	for name, endpoint := range map[string]string{"unset URL": "", "connection refused": server.URL} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("JUDGE0_URL", endpoint)
+			t.Setenv("JUDGE0_BATCH_SIZE", "20")
+			results, err := NewClient().CreateBatch(context.Background(), make([]SubmissionRequest, 2))
+			if !errors.Is(err, ErrDispatchRejected) || len(results) != 2 {
+				t.Fatal(results, err)
+			}
+			for _, result := range results {
+				if result.Token != "" || !errors.Is(result.Error, ErrDispatchRejected) {
+					t.Fatal(result)
 				}
 			}
 		})
@@ -146,6 +171,9 @@ func TestGetSubmissionsRequestsBase64(t *testing.T) {
 		if got := r.URL.Query().Get("base64_encoded"); got != "true" {
 			t.Errorf("base64_encoded = %q, want %q", got, "true")
 		}
+		if fields := r.URL.Query().Get("fields"); strings.Contains(fields, "stdout") || !strings.Contains(fields, "stderr") || !strings.Contains(fields, "compile_output") {
+			t.Errorf("routine polls must omit stdout and preserve diagnostics: %q", fields)
+		}
 		w.Write([]byte(`{"submissions":[{"token":"a","status":{"id":3}}]}`))
 	}))
 	defer server.Close()
@@ -178,5 +206,132 @@ func TestDispatchTimeout(t *testing.T) {
 	}
 	if timeout := (*Client)(nil).Timeout(); timeout != 10*time.Second {
 		t.Fatalf("fallback timeout = %v", timeout)
+	}
+}
+
+func TestBase64AndPartialBatchMapping(t *testing.T) {
+	for _, failAt := range []int32{0, 2} {
+		t.Run(fmt.Sprint(failAt), func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				call := requests.Add(1)
+				if r.URL.Query().Get("base64_encoded") != "true" {
+					t.Error("base64 contract disabled")
+				}
+				var payload struct {
+					Submissions []SubmissionRequest `json:"submissions"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Error(err)
+					return
+				}
+				for i, job := range payload.Submissions {
+					for _, value := range []struct{ got, want string }{{job.SourceCode, "print('नमस्ते')\n"}, {job.Stdin, ""}, {*job.ExpectedOutput, "नमस्ते\n"}} {
+						decoded, err := base64.StdEncoding.DecodeString(value.got)
+						if err != nil || string(decoded) != value.want {
+							t.Errorf("job %d encoded=%q want=%q error=%v", i, decoded, value.want, err)
+						}
+					}
+				}
+				if call == failAt {
+					w.WriteHeader(504)
+					return
+				}
+				w.WriteHeader(201)
+				responses := make([]map[string]string, len(payload.Submissions))
+				for i := range responses {
+					responses[i] = map[string]string{"token": fmt.Sprint((int(call)-1)*2 + i)}
+				}
+				json.NewEncoder(w).Encode(responses)
+			}))
+			defer server.Close()
+			t.Setenv("JUDGE0_URL", server.URL)
+			t.Setenv("JUDGE0_BATCH_SIZE", "2")
+			output := "नमस्ते\n"
+			jobs := make([]SubmissionRequest, 5)
+			for i := range jobs {
+				jobs[i] = SubmissionRequest{SourceCode: "print('नमस्ते')\n", Stdin: "", ExpectedOutput: &output}
+			}
+			results, err := NewClient().CreateBatch(context.Background(), jobs)
+			if failAt == 0 {
+				if err != nil {
+					t.Fatal(err)
+				}
+				for i, r := range results {
+					if r.Token != fmt.Sprint(i) {
+						t.Fatalf("result %d=%+v", i, r)
+					}
+				}
+			} else {
+				if !errors.Is(err, ErrUnavailable) || results[0].Token != "0" || results[1].Token != "1" || !errors.Is(results[2].Error, ErrUnavailable) || !errors.Is(results[3].Error, ErrUnavailable) || !errors.Is(results[4].Error, ErrDispatchNotSent) {
+					t.Fatalf("partial results=%+v, %v", results, err)
+				}
+			}
+			if jobs[0].SourceCode != "print('नमस्ते')\n" || *jobs[0].ExpectedOutput != output {
+				t.Fatal("client mutated caller inputs")
+			}
+		})
+	}
+}
+func TestAcceptedDispatchTimeoutIsAmbiguous(t *testing.T) {
+	var accepted atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accepted.Store(true)
+		time.Sleep(60 * time.Millisecond)
+		w.WriteHeader(201)
+		w.Write([]byte(`[{"token":"already-created"}]`))
+	}))
+	defer server.Close()
+	t.Setenv("JUDGE0_URL", server.URL)
+	t.Setenv("JUDGE0_TIMEOUT_MS", "20")
+	results, err := NewClient().CreateBatch(context.Background(), []SubmissionRequest{{SourceCode: "print(1)"}})
+	if !accepted.Load() || !errors.Is(err, ErrUnavailable) || errors.Is(err, ErrDispatchRejected) || len(results) != 1 || results[0].Token != "" {
+		t.Fatalf("accepted=%v result=%+v err=%v", accepted.Load(), results, err)
+	}
+}
+func TestCallbackAttemptAuthentication(t *testing.T) {
+	t.Setenv("JUDGE0_CALLBACK_BASE_URL", "https://callback.test")
+	t.Setenv("JUDGE0_CALLBACK_SECRET", "secret")
+	c := NewClient()
+	id := "e032ee69-cfd1-4350-b083-cc6e9822e9ec"
+	u, _ := url.Parse(c.CallbackURL(id, "attempt"))
+	if u.Query().Get("attempt") != "attempt" || !c.VerifyCallback(id, u.Query().Get("sig"), "attempt") || c.VerifyCallback(id, u.Query().Get("sig"), "other") || c.VerifyCallback(id, u.Query().Get("sig")) {
+		t.Fatal("attempt signature not fenced")
+	}
+}
+
+func TestPollingLargeDiagnosticsBatch(t *testing.T) {
+	for _, tc := range []struct {
+		name                           string
+		count, compilerBytes, errBytes int
+		tooLarge                       bool
+	}{
+		{"maximum warnings and stderr", 1, 4 << 20, 4 << 20, false},
+		{"batch diagnostics", 20, 0, 256 << 10, false},
+		{"oversized response", 1, 9 << 20, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tokens := make([]string, tc.count)
+			results := make([]SubmissionStatusResponse, len(tokens))
+			compiler, _ := json.Marshal(base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", tc.compilerBytes))))
+			stderr, _ := json.Marshal(base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", tc.errBytes))))
+			for i := range tokens {
+				tokens[i] = fmt.Sprint(i)
+				results[i] = SubmissionStatusResponse{Token: tokens[i], CompileOutput: compiler, Stderr: stderr, Status: StatusResponse{ID: 3}}
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(map[string]any{"submissions": results})
+			}))
+			defer server.Close()
+			t.Setenv("JUDGE0_URL", server.URL)
+			got, err := NewClient().GetSubmissions(context.Background(), tokens)
+			if tc.tooLarge {
+				if !errors.Is(err, ErrInvalidResponse) {
+					t.Fatalf("oversized response error=%v", err)
+				}
+			} else if err != nil || len(got) != len(tokens) || string(got[0].CompileOutput) != string(compiler) || string(got[0].Stderr) != string(stderr) {
+				t.Fatalf("valid output batch rejected or changed: results=%d error=%v", len(got), err)
+			}
+		})
 	}
 }

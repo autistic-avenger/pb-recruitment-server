@@ -37,16 +37,18 @@ func (sc *SubmissionController) Judge0Callback(c echo.Context) error {
 	if _, err := uuid.Parse(id); err != nil {
 		return c.NoContent(http.StatusBadRequest)
 	}
-	if sc.judge0Client == nil || !sc.judge0Client.CallbacksEnabled() || !sc.judge0Client.VerifyCallback(id, c.QueryParam("sig")) {
+	attempt := c.QueryParam("attempt")
+	if sc.judge0Client == nil || !sc.judge0Client.CallbacksEnabled() || !sc.judge0Client.VerifyCallback(id, c.QueryParam("sig"), attempt) {
 		return c.NoContent(http.StatusUnauthorized)
 	}
-	var payload judge0.CallbackResult
+	var payload judge0.SubmissionStatusResponse
 	if err := json.NewDecoder(c.Request().Body).Decode(&payload); err != nil {
 		return c.NoContent(http.StatusBadRequest)
 	}
 	if payload.Token == "" || payload.Status.ID < 1 || payload.Status.ID > 14 {
 		return c.NoContent(http.StatusBadRequest)
 	}
+	payload.Attempt = attempt
 	if err := sc.submissionService.HandleJudge0Callback(c.Request().Context(), id, payload); err != nil {
 		log.Errorf("judge0 callback failed for execution %s: %v", id, err)
 		return c.NoContent(http.StatusInternalServerError)
