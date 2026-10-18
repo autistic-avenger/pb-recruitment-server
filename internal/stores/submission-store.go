@@ -441,16 +441,16 @@ func (s *SubmissionStore) CheckSubmissionRateLimit(ctx context.Context, userID s
 		return nil
 	}
 
-	now := time.Now().Unix()
+	// Conflict updates must sample the clock after acquiring the row lock.
 	const q = `
 		INSERT INTO submission_rate_limits (user_id, last_submission_at)
-		VALUES ($1, $2)
+		VALUES ($1, floor(extract(epoch from clock_timestamp()))::bigint)
 		ON CONFLICT (user_id) DO UPDATE
-		SET last_submission_at = EXCLUDED.last_submission_at
-		WHERE EXCLUDED.last_submission_at - submission_rate_limits.last_submission_at >= $3
+		SET last_submission_at = floor(extract(epoch from clock_timestamp()))::bigint
+		WHERE floor(extract(epoch from clock_timestamp()))::bigint - submission_rate_limits.last_submission_at >= $2
 	`
 
-	res, err := s.db.ExecContext(ctx, q, userID, now, cooldownSeconds)
+	res, err := s.db.ExecContext(ctx, q, userID, cooldownSeconds)
 	if err != nil {
 		return fmt.Errorf("check submission rate limit: %w", err)
 	}
@@ -464,5 +464,24 @@ func (s *SubmissionStore) CheckSubmissionRateLimit(ctx context.Context, userID s
 		return common.ErrRateLimitExceeded
 	}
 
+	return nil
+}
+
+func (s *SubmissionStore) CheckRunCapacity(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return errors.New("run capacity database unavailable")
+	}
+	// Reserve before checking backlog so a Run burst checks it at most once per second.
+	// shortcut: admitted Runs may finish ahead of new submits; measure judge capacity before raising this limit.
+	if err := s.CheckSubmissionRateLimit(ctx, "run:capacity", 1); err != nil {
+		return err
+	}
+	var pending bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM submissions WHERE type='code' AND status='pending')`).Scan(&pending); err != nil {
+		return fmt.Errorf("check run capacity: %w", err)
+	}
+	if pending {
+		return common.ErrRateLimitExceeded
+	}
 	return nil
 }

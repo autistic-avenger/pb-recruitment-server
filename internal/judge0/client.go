@@ -156,8 +156,12 @@ func (c *Client) CreateBatch(ctx context.Context, jobs []SubmissionRequest) ([]S
 }
 
 func (c *Client) GetSubmissions(ctx context.Context, tokens []string) ([]*SubmissionStatusResponse, error) {
-	// Stdout is only needed to verify Judge0's blank-output Wrong Answer defect.
+	// Scoring polls only need stdout when verifying Judge0's blank-output defect.
 	return c.getSubmissions(ctx, tokens, "token,time,memory,status,compile_output,stderr")
+}
+
+func (c *Client) GetSubmissionsWithOutput(ctx context.Context, tokens []string) ([]*SubmissionStatusResponse, error) {
+	return c.getSubmissions(ctx, tokens, "token,time,memory,status,stdout,compile_output,stderr")
 }
 
 func (c *Client) GetSubmissionStdout(ctx context.Context, token string) (json.RawMessage, error) {
@@ -199,6 +203,10 @@ func (c *Client) getSubmissions(ctx context.Context, tokens []string, fields str
 	}
 	// Keep the response bound proportional to the requested batch.
 	if err = json.NewDecoder(io.LimitReader(resp.Body, int64(len(tokens))*maxResultBytesPerSubmission)).Decode(&out); err != nil {
+		var networkErr net.Error
+		if errors.As(err, &networkErr) || errors.Is(err, context.Canceled) {
+			return nil, errors.Join(ErrUnavailable, err)
+		}
 		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
 	}
 	if len(out.Submissions) != len(tokens) {
@@ -243,7 +251,7 @@ func (c *Client) postBatch(ctx context.Context, jobs []SubmissionRequest) ([]Sub
 	if err != nil {
 		var dialErr *net.OpError
 		if errors.As(err, &dialErr) && dialErr.Op == "dial" {
-			return nil, fmt.Errorf("%w: %v", ErrDispatchRejected, err)
+			return nil, fmt.Errorf("%w: %w", ErrDispatchNotSent, err)
 		}
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
@@ -252,9 +260,10 @@ func (c *Client) postBatch(ctx context.Context, jobs []SubmissionRequest) ([]Sub
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		failure := ErrUnavailable
-		// A proxy's 503 is ambiguous; only Judge0's explicit queue rejection is definitive.
-		if (resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusRequestTimeout) ||
-			(resp.StatusCode == http.StatusServiceUnavailable && bytes.Equal(bytes.TrimSpace(body), []byte(`{"error":"queue is full"}`))) {
+		// Proxy 503s remain ambiguous.
+		if resp.StatusCode == http.StatusServiceUnavailable && bytes.Equal(bytes.TrimSpace(body), []byte(`{"error":"queue is full"}`)) {
+			failure = ErrQueueFull
+		} else if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusRequestTimeout {
 			failure = ErrDispatchRejected
 		}
 		return nil, fmt.Errorf("%w: status %d: %s", failure, resp.StatusCode, string(body))
