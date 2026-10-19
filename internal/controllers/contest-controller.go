@@ -60,6 +60,7 @@ func (cc *ContestController) GetDolosReport(ctx echo.Context) error {
 // @Produce      json
 // @Security     BearerAuth
 // @Param        id path string true "Contest ID"
+// @Param        page query int false "Zero-based page number; 100 pairs per page"
 // @Success      200 {array} dto.PlagiarismPair
 // @Failure      401 {object} map[string]string "Unauthorized"
 // @Failure      403 {object} map[string]string "Forbidden - Admin access required"
@@ -68,7 +69,15 @@ func (cc *ContestController) GetDolosReport(ctx echo.Context) error {
 // @Failure      500 {object} map[string]string "Internal server error"
 // @Router       /admin/contest/{id}/plagiarism/pairs [get]
 func (cc *ContestController) GetDolosPairs(ctx echo.Context) error {
-	pairs, err := cc.dolosService.GetPairs(ctx.Request().Context(), ctx.Param("id"))
+	page := 0
+	if raw := ctx.QueryParam("page"); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed < 0 {
+			return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "page must be a non-negative integer"})
+		}
+		page = parsed
+	}
+	pairs, err := cc.dolosService.GetPairs(ctx.Request().Context(), ctx.Param("id"), page)
 	if err != nil {
 		if errors.Is(err, common.ContestNotFoundError) {
 			return ctx.JSON(http.StatusNotFound, map[string]string{"error": "contest not found"})

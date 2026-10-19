@@ -4,6 +4,7 @@ import (
 	"app/internal/common"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -59,6 +60,17 @@ func (s *S3) PutObject(context context.Context, key string, contents string) err
 }
 
 func (s *S3) GetObject(context context.Context, key string) (string, error) {
+	return s.getObject(context, key, 0)
+}
+
+func (s *S3) GetObjectLimit(context context.Context, key string, maxBytes int64) (string, error) {
+	if maxBytes < 0 {
+		return "", errors.New("object byte limit must be non-negative")
+	}
+	return s.getObject(context, key, maxBytes)
+}
+
+func (s *S3) getObject(context context.Context, key string, maxBytes int64) (string, error) {
 	resp, err := s.client.GetObject(context, &s3.GetObjectInput{
 		Bucket: aws.String(s.Bucket),
 		Key:    aws.String(key),
@@ -74,12 +86,20 @@ func (s *S3) GetObject(context context.Context, key string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	var body []byte
+	if maxBytes > 0 {
+		body, err = io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	} else {
+		body, err = io.ReadAll(resp.Body)
+	}
 	if err != nil {
 		log.Errorf("s3: failed to read object body: %v", err)
 		return "", err
 	}
 
+	if maxBytes > 0 && int64(len(body)) > maxBytes {
+		return "", fmt.Errorf("s3 object exceeds %d byte limit", maxBytes)
+	}
 	return string(body), nil
 }
 

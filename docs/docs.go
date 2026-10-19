@@ -513,6 +513,12 @@ const docTemplate = `{
                         "name": "id",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Zero-based page number; 100 pairs per page",
+                        "name": "page",
+                        "in": "query"
                     }
                 ],
                 "responses": {
