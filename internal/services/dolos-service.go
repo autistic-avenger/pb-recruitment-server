@@ -139,26 +139,10 @@ func (d *DolosService) GetReport(ctx context.Context, contestID string) (*DolosR
 		}, nil
 	}
 
-	allFinished := true
-	allSkipped := true
-	hasRunning := false
-	hasFailed := false
 	var firstURL string
 	var errMsgs []string
 
 	for _, r := range reports {
-		if r.Status != "finished" {
-			allFinished = false
-		}
-		if r.Status != "skipped" {
-			allSkipped = false
-		}
-		if r.Status == "queued" || r.Status == "running" || r.Status == "processing" || r.Status == "pending" || r.Status == "unknown" {
-			hasRunning = true
-		}
-		if r.Status == "failed" || r.Status == "error" {
-			hasFailed = true
-		}
 		if r.ReportURL != "" && firstURL == "" {
 			firstURL = r.ReportURL
 		}
@@ -167,14 +151,7 @@ func (d *DolosService) GetReport(ctx context.Context, contestID string) (*DolosR
 		}
 	}
 
-	overallStatus := "processing"
-	if allSkipped {
-		overallStatus = "skipped"
-	} else if allFinished || (!hasRunning && !hasFailed && !hasUnknownOrPurged(reports)) {
-		overallStatus = "finished"
-	} else if !hasRunning && (hasFailed || hasUnknownOrPurged(reports)) {
-		overallStatus = "failed"
-	}
+	overallStatus := dolosOverallStatus(reports)
 
 	var combinedErr string
 	if len(errMsgs) > 0 {
@@ -187,6 +164,34 @@ func (d *DolosService) GetReport(ctx context.Context, contestID string) (*DolosR
 		Error:     combinedErr,
 		Reports:   reports,
 	}, nil
+}
+
+func dolosOverallStatus(reports []dto.ProblemReportSummary) string {
+	allSkipped, allComplete, hasRunning, hasFailed := true, true, false, false
+	for _, r := range reports {
+		if r.Status != "skipped" {
+			allSkipped = false
+		}
+		if r.Status != "finished" && r.Status != "skipped" {
+			allComplete = false
+		}
+		switch r.Status {
+		case "queued", "running", "processing", "uploading", "pending", "unknown":
+			hasRunning = true
+		case "failed", "error":
+			hasFailed = true
+		}
+	}
+	if allSkipped {
+		return "skipped"
+	}
+	if allComplete {
+		return "finished"
+	}
+	if !hasRunning && (hasFailed || hasUnknownOrPurged(reports)) {
+		return "failed"
+	}
+	return "processing"
 }
 
 func (d *DolosService) contestEvidenceCurrent(ctx context.Context, contestID string) (bool, error) {
@@ -225,10 +230,9 @@ func hasUnknownOrPurged(reports []dto.ProblemReportSummary) bool {
 	return false
 }
 
-func (d *DolosService) GetPairs(ctx context.Context, contestID string, pages ...int) ([]dto.PlagiarismPair, error) {
-	page := 0
-	if len(pages) > 0 && pages[0] > 0 {
-		page = pages[0]
+func (d *DolosService) GetPairs(ctx context.Context, contestID string, page int) ([]dto.PlagiarismPair, error) {
+	if page < 0 {
+		page = 0
 	}
 	if err := d.checkContestExists(ctx, contestID); err != nil {
 		return nil, err
@@ -598,41 +602,20 @@ func (d *DolosService) ReviewPair(ctx context.Context, contestID, key, expectedR
 		return common.ErrInvalidPairKey
 	}
 
-	// Validate against the complete canonical provider evidence; display pagination
-	// and user enrichment must never decide whether a pair can be reviewed.
-	rows, err := d.db.QueryContext(ctx, `SELECT dolos_report_id FROM contest_plagiarism_reports WHERE contest_id=$1 AND status='finished' AND dolos_report_id IS NOT NULL AND dolos_report_id<>'' ORDER BY problem_id, language`, contestID)
+	// The displayed report ID scopes the provider lookup. An unrelated report
+	// must not make this review fail if its provider endpoint is unavailable.
+	var foundReport string
+	if err := d.db.QueryRowContext(ctx, `SELECT dolos_report_id FROM contest_plagiarism_reports WHERE contest_id=$1 AND status='finished' AND dolos_report_id=$2`, contestID, expectedReportID).Scan(&foundReport); err != nil {
+		if err == sql.ErrNoRows {
+			return common.ErrPairNotFound
+		}
+		return err
+	}
+	found, err := d.fetchReportPairMembership(ctx, foundReport, key)
 	if err != nil {
 		return err
 	}
-	var reportIDs []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		reportIDs = append(reportIDs, id)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	foundReport := ""
-	for _, id := range reportIDs {
-		found, err := d.fetchReportPairMembership(ctx, id, key)
-		if err != nil {
-			return err
-		}
-		if found {
-			foundReport = id
-			break
-		}
-	}
-	if foundReport == "" {
-		return common.ErrPairNotFound
-	}
-	if foundReport != expectedReportID {
+	if !found {
 		return common.ErrPairNotFound
 	}
 
@@ -787,6 +770,23 @@ func (d *DolosService) processContest(ctx context.Context, contestID, contestNam
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM contests WHERE id=$1 FOR UPDATE`, contestID).Scan(&locked); err != nil {
 		return err
 	}
+	// The snapshot above was built before taking the lock. Re-read the inputs
+	// while holding it so a contest reopened or changed while we waited cannot
+	// initialize a stale generation.
+	var lockedEnd, lockedCount, lockedLatest int64
+	if err := tx.QueryRowContext(ctx, `SELECT c.end_time, COUNT(s.id), COALESCE(MAX(s.created_at),0) FROM contests c LEFT JOIN submissions s ON s.contest_id=c.id AND s.type='code' WHERE c.id=$1 GROUP BY c.id`, contestID).Scan(&lockedEnd, &lockedCount, &lockedLatest); err != nil {
+		return err
+	}
+	if lockedEnd != currentEndTime || lockedEnd > time.Now().Add(-30*time.Second).UnixMilli() || lockedCount != sourceCount || lockedLatest != latestSubmission {
+		return tx.Rollback()
+	}
+	lockedSources, err := listSourcesTx(ctx, tx, contestID)
+	if err != nil {
+		return err
+	}
+	if sourceSignature(lockedEnd, lockedSources) != signature {
+		return tx.Rollback()
+	}
 	txRunErr := tx.QueryRowContext(ctx, `SELECT source_signature FROM contest_plagiarism_runs WHERE contest_id=$1 FOR UPDATE`, contestID).Scan(&previousSignature)
 	if txRunErr != nil && txRunErr != sql.ErrNoRows {
 		return txRunErr
@@ -897,17 +897,47 @@ func (d *DolosService) processContest(ctx context.Context, contestID, contestNam
 			}
 			continue
 		}
-		// Record the irreversible upload boundary before contacting the provider.
-		res, err = d.db.ExecContext(ctx, `UPDATE contest_plagiarism_reports SET status='uploading', updated_at=NOW() WHERE contest_id=$1 AND problem_id=$2 AND language=$3 AND claim_token=$4 AND status='processing'`, contestID, k.problemID, k.language, claimToken)
+		// Revalidate contest eligibility and the exact evidence generation at the
+		// upload boundary. The provider call remains outside this transaction.
+		uploadTx, err := d.db.BeginTx(ctx, nil)
 		if err != nil {
+			return err
+		}
+		var uploadEnd int64
+		if err = uploadTx.QueryRowContext(ctx, `SELECT end_time FROM contests WHERE id=$1 FOR UPDATE`, contestID).Scan(&uploadEnd); err != nil {
+			uploadTx.Rollback()
+			return err
+		}
+		var runSignature string
+		if err = uploadTx.QueryRowContext(ctx, `SELECT source_signature FROM contest_plagiarism_runs WHERE contest_id=$1`, contestID).Scan(&runSignature); err != nil {
+			uploadTx.Rollback()
+			return err
+		}
+		boundarySources, sourceErr := listSourcesTx(ctx, uploadTx, contestID)
+		if sourceErr != nil {
+			uploadTx.Rollback()
+			return sourceErr
+		}
+		if uploadEnd != currentEndTime || uploadEnd > time.Now().Add(-30*time.Second).UnixMilli() || sourceSignature(uploadEnd, boundarySources) != signature || runSignature != signature {
+			uploadTx.Rollback()
+			continue
+		}
+		res, err = uploadTx.ExecContext(ctx, `UPDATE contest_plagiarism_reports SET status='uploading', updated_at=NOW() WHERE contest_id=$1 AND problem_id=$2 AND language=$3 AND claim_token=$4 AND status='processing'`, contestID, k.problemID, k.language, claimToken)
+		if err != nil {
+			uploadTx.Rollback()
 			return fmt.Errorf("persist Dolos upload phase: %w", err)
 		}
 		owned, err = res.RowsAffected()
 		if err != nil {
+			uploadTx.Rollback()
 			return err
 		}
 		if owned == 0 {
+			uploadTx.Rollback()
 			continue
+		}
+		if err := uploadTx.Commit(); err != nil {
+			return err
 		}
 
 		reportName := fmt.Sprintf("%s - %s - %s", contestName, k.problemID, k.language)
@@ -1114,7 +1144,15 @@ func (d *DolosService) saveGroupError(ctx context.Context, contestID, problemID,
 }
 
 func (d *DolosService) listSources(ctx context.Context, contestID string) ([]dolosSource, error) {
-	rows, err := d.db.QueryContext(ctx, `
+	return listSourcesTx(ctx, d.db, contestID)
+}
+
+type dolosQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func listSourcesTx(ctx context.Context, q dolosQueryer, contestID string) ([]dolosSource, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT DISTINCT ON (user_id, problem_id)
 			id::text, user_id::text, problem_id::text, COALESCE(language, '')
 		FROM submissions
