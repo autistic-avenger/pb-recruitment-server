@@ -586,7 +586,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Record human decision (cleared, confirmed, unreviewed) and optional notes for a plagiarism candidate pair",
+                "description": "Record human decision (cleared, confirmed, unreviewed), optional notes, and the displayed report_id for a plagiarism candidate pair",
                 "consumes": [
                     "application/json"
                 ],
@@ -3158,6 +3158,9 @@ const docTemplate = `{
                 "longest_fragment": {
                     "type": "integer"
                 },
+                "report_id": {
+                    "type": "string"
+                },
                 "review_note": {
                     "type": "string"
                 },
@@ -3184,12 +3187,16 @@ const docTemplate = `{
         "app_internal_models_dto.PlagiarismPairReviewRequest": {
             "type": "object",
             "required": [
+                "report_id",
                 "status"
             ],
             "properties": {
                 "note": {
                     "type": "string",
                     "maxLength": 1000
+                },
+                "report_id": {
+                    "type": "string"
                 },
                 "status": {
                     "type": "string",

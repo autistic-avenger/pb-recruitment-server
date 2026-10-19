@@ -96,7 +96,7 @@ func (cc *ContestController) GetDolosPairs(ctx echo.Context) error {
 
 // ReviewDolosPair godoc
 // @Summary      Review plagiarism pair (Admin)
-// @Description  Record human decision (cleared, confirmed, unreviewed) and optional notes for a plagiarism candidate pair
+// @Description  Record human decision (cleared, confirmed, unreviewed), optional notes, and the displayed report_id for a plagiarism candidate pair
 // @Tags         Admin - Contests
 // @Accept       json
 // @Produce      json
@@ -114,7 +114,7 @@ func (cc *ContestController) GetDolosPairs(ctx echo.Context) error {
 // @Router       /admin/contest/{id}/plagiarism/pairs/{pairKey} [patch]
 func (cc *ContestController) ReviewDolosPair(ctx echo.Context) error {
 	req := ctx.Get(common.VALIDATED_REQUEST_BODY).(*dto.PlagiarismPairReviewRequest)
-	if err := cc.dolosService.ReviewPair(ctx.Request().Context(), ctx.Param("id"), ctx.Param("pairKey"), req.Status, req.Note); err != nil {
+	if err := cc.dolosService.ReviewPair(ctx.Request().Context(), ctx.Param("id"), ctx.Param("pairKey"), req.ReportID, req.Status, req.Note); err != nil {
 		if errors.Is(err, common.ContestNotFoundError) {
 			return ctx.JSON(http.StatusNotFound, map[string]string{"error": "contest not found"})
 		}

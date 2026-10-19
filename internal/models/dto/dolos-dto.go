@@ -1,12 +1,14 @@
 package dto
 
 type PlagiarismPairReviewRequest struct {
-	Status string `json:"status" validate:"required,oneof=cleared confirmed unreviewed"`
-	Note   string `json:"note" validate:"max=1000"`
+	Status   string `json:"status" validate:"required,oneof=cleared confirmed unreviewed"`
+	Note     string `json:"note" validate:"max=1000"`
+	ReportID string `json:"report_id" validate:"required"`
 }
 
 type PlagiarismPair struct {
 	Key             string  `json:"key"`
+	ReportID        string  `json:"report_id"`
 	LeftFile        string  `json:"left_file"`
 	LeftUserID      string  `json:"left_user_id"`
 	LeftName        string  `json:"left_name,omitempty"`

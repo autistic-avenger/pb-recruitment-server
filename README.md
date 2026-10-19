@@ -23,10 +23,11 @@ make swagger
 - Add `DB_ADDR` to `.env`
 - Run these commands from the backend directory. Include `$HOME/go/bin` in `PATH`
   if `migrate` was installed with `go install`.
-- The current schema requires migrations through `000034`: submission cooldowns
+- The current schema requires migrations through `000036`: submission cooldowns
   (`000027`), saved final ranks (`000028`), internal compiler diagnostics (`000029`),
   Judge0 recovery state (`000030`), ordered recovery claims (`000031`), a single recovery deadline
-  (`000032`), and Dolos plagiarism report and review state (`000033`–`000034`).
+  (`000032`), Dolos plagiarism report and review state (`000033`–`000035`), and
+  invalidation of unversioned legacy Dolos evidence (`000036`).
   `make migrate-up` applies only pending migrations; do not force the version or
   roll back a production database.
 
@@ -261,7 +262,7 @@ Admin REST APIs:
 - `GET /admin/contest/{id}/plagiarism/pairs`: Retrieves matching submission pairs across finished problem reports with similarity metrics and human review decisions.
 - `PATCH /admin/contest/{id}/plagiarism/pairs/{pairKey}`: Records human review decisions (`cleared`, `confirmed`, `unreviewed`) with an optional note (up to 1000 characters) for a verified pair in the report evidence.
 
-Apply migrations `000033` and `000034` before deploying. Note that frontend UI integration for Dolos is not yet shipped; these endpoints are accessible via admin API clients.
+Apply migrations `000033` through `000036` before deploying. Stop Dolos replicas running a pre-`000035` binary before applying `000035`, because the review-key schema changes at that migration. The migration `000036` clears unversioned legacy reports and their reviews so they are regenerated from current submissions. Roll back by stopping the new replicas first; restore a matching database backup before deploying a pre-`000035` binary, since migration `000035` changes the review primary key. Pair review PATCH requests must include the displayed `report_id`. Note that frontend UI integration for Dolos is not yet shipped; these endpoints are accessible via admin API clients.
 
 ### Local connection to the EC2 judge
 
