@@ -790,7 +790,7 @@ func (d *DolosService) processContest(ctx context.Context, contestID, contestNam
 				INSERT INTO contest_plagiarism_reports AS r(contest_id, problem_id, language, status, error, updated_at)
 				VALUES($1, $2, $3, 'skipped', 'Fewer than two distinct participants', NOW())
 				ON CONFLICT(contest_id, problem_id, language)
-				DO UPDATE SET status = 'skipped', error = EXCLUDED.error, updated_at = NOW()
+				DO UPDATE SET status = 'skipped', dolos_report_id=NULL, report_url=NULL, error = EXCLUDED.error, claim_token=NULL, updated_at = NOW()
 				WHERE r.status NOT IN ('finished')
 			`, contestID, k.problemID, k.language)
 			if err != nil {
@@ -895,11 +895,10 @@ func (d *DolosService) processContest(ctx context.Context, contestID, contestNam
 		return err
 	}
 
-	d.pollActiveReports(ctx, contestID)
-	return nil
+	return d.pollActiveReports(ctx, contestID)
 }
 
-func (d *DolosService) pollActiveReports(ctx context.Context, contestID string) {
+func (d *DolosService) pollActiveReports(ctx context.Context, contestID string) error {
 	rows, err := d.db.QueryContext(ctx, `
 		SELECT problem_id, language, dolos_report_id, attempts
 		FROM contest_plagiarism_reports
@@ -910,7 +909,7 @@ func (d *DolosService) pollActiveReports(ctx context.Context, contestID string) 
 		  AND next_retry_at <= NOW()
 	`, contestID)
 	if err != nil {
-		return
+		return err
 	}
 	defer rows.Close()
 
@@ -923,41 +922,41 @@ func (d *DolosService) pollActiveReports(ctx context.Context, contestID string) 
 	var toPoll []activeRep
 	for rows.Next() {
 		var a activeRep
-		if err := rows.Scan(&a.problemID, &a.language, &a.reportID, &a.attempts); err == nil {
-			toPoll = append(toPoll, a)
-		}
+		if err := rows.Scan(&a.problemID, &a.language, &a.reportID, &a.attempts); err != nil { rows.Close(); return err }
+		toPoll = append(toPoll, a)
 	}
+	if err := rows.Err(); err != nil { rows.Close(); return err }
 	rows.Close()
 
 	for _, a := range toPoll {
 		if ctx.Err() != nil {
-			return
+			return ctx.Err()
 		}
 		endpoint := d.baseURL + "/reports/" + url.PathEscape(a.reportID)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
-			d.schedulePollRetry(ctx, contestID, a.problemID, a.language, a.attempts)
+			if err := d.schedulePollRetry(ctx, contestID, a.problemID, a.language, a.attempts); err != nil { return err }
 			continue
 		}
 		resp, err := d.client.Do(req)
 		if err != nil {
-			d.schedulePollRetry(ctx, contestID, a.problemID, a.language, a.attempts)
+			if err := d.schedulePollRetry(ctx, contestID, a.problemID, a.language, a.attempts); err != nil { return err }
 			continue
 		}
 
 		if resp.StatusCode == http.StatusNotFound {
 			resp.Body.Close()
-			_, _ = d.db.ExecContext(ctx, `
+			if _, err := d.db.ExecContext(ctx, `
 				UPDATE contest_plagiarism_reports
 				SET status = 'error', error = 'Report not found on provider (404)', updated_at = NOW()
-				WHERE contest_id = $1 AND problem_id = $2 AND language = $3
-			`, contestID, a.problemID, a.language)
+				WHERE contest_id = $1 AND problem_id = $2 AND language = $3 AND dolos_report_id=$4
+			`, contestID, a.problemID, a.language, a.reportID); err != nil { return err }
 			continue
 		}
 
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			d.schedulePollRetry(ctx, contestID, a.problemID, a.language, a.attempts)
+			if err := d.schedulePollRetry(ctx, contestID, a.problemID, a.language, a.attempts); err != nil { return err }
 			continue
 		}
 
@@ -965,40 +964,43 @@ func (d *DolosService) pollActiveReports(ctx context.Context, contestID string) 
 		err = json.NewDecoder(io.LimitReader(resp.Body, 1024*1024)).Decode(&remote)
 		resp.Body.Close()
 		if err != nil {
+			if retryErr := d.schedulePollRetry(ctx, contestID, a.problemID, a.language, a.attempts); retryErr != nil { return retryErr }
 			continue
 		}
 
 		remote.Status = validateStatus(remote.Status)
 
 		if remote.Status == "unknown" {
-			d.schedulePollRetry(ctx, contestID, a.problemID, a.language, a.attempts)
+			if err := d.schedulePollRetry(ctx, contestID, a.problemID, a.language, a.attempts); err != nil { return err }
 			continue
 		}
-		_, _ = d.db.ExecContext(ctx, `
+		if _, err := d.db.ExecContext(ctx, `
 			UPDATE contest_plagiarism_reports
 			SET status = $4,
 			    error = NULLIF($5, ''),
 			    next_retry_at = CASE WHEN $4 IN ('queued', 'running') THEN NOW() + INTERVAL '15 seconds' ELSE next_retry_at END,
 			    updated_at = NOW()
 			WHERE contest_id = $1 AND problem_id = $2 AND language = $3 AND dolos_report_id = $6
-		`, contestID, a.problemID, a.language, remote.Status, remote.Error, a.reportID)
+		`, contestID, a.problemID, a.language, remote.Status, remote.Error, a.reportID); err != nil { return err }
 	}
+	return nil
 }
 
-func (d *DolosService) schedulePollRetry(ctx context.Context, contestID, problemID, language string, currentAttempts int) {
+func (d *DolosService) schedulePollRetry(ctx context.Context, contestID, problemID, language string, currentAttempts int) error {
 	if currentAttempts >= 10 {
-		_, _ = d.db.ExecContext(ctx, `
+		_, err := d.db.ExecContext(ctx, `
 			UPDATE contest_plagiarism_reports
 			SET status = 'failed', error = 'Polling exceeded maximum attempts', updated_at = NOW()
 			WHERE contest_id = $1 AND problem_id = $2 AND language = $3
 		`, contestID, problemID, language)
-		return
+		return err
 	}
-	_, _ = d.db.ExecContext(ctx, `
+	_, err := d.db.ExecContext(ctx, `
 		UPDATE contest_plagiarism_reports
 		SET attempts = attempts + 1, next_retry_at = NOW() + INTERVAL '30 seconds', updated_at = NOW()
 		WHERE contest_id = $1 AND problem_id = $2 AND language = $3
 	`, contestID, problemID, language)
+	return err
 }
 
 func validateStatus(raw string) string {
