@@ -45,7 +45,7 @@ func TestUpdateContestStartTime(t *testing.T) {
 			contestStore := &contestUpdateTestStore{submissionContestStore: submissionContestStore{
 				contest: models.Contest{ID: "contest", StartTime: tc.start, EndTime: tc.end},
 			}}
-			controller := NewContestController(services.NewContestService(&stores.Storage{Contests: contestStore}, nil))
+			controller := NewContestController(services.NewContestService(&stores.Storage{Contests: contestStore}, nil), nil)
 			recorder := httptest.NewRecorder()
 			ctx := echo.New().NewContext(httptest.NewRequest(http.MethodPut, "/admin/contest/contest", nil), recorder)
 			ctx.SetParamNames("id")
@@ -75,7 +75,7 @@ func TestProblemMutationsAfterStart(t *testing.T) {
 		for _, action := range []string{"update", "delete"} {
 			t.Run(action+"/"+time.UnixMilli(end).Format(time.RFC3339), func(t *testing.T) {
 				storage := &stores.Storage{Contests: submissionContestStore{contest: models.Contest{StartTime: now - 120_000, EndTime: end}}}
-				controller := NewContestController(services.NewContestService(storage, nil))
+				controller := NewContestController(services.NewContestService(storage, nil), nil)
 				recorder := httptest.NewRecorder()
 				ctx := echo.New().NewContext(httptest.NewRequest(http.MethodPut, "/admin/contest/problem/problem", nil), recorder)
 				ctx.SetParamNames("contestid", "problemid")
@@ -97,7 +97,7 @@ func TestProblemMutationsAfterStart(t *testing.T) {
 }
 
 func TestProblemInvalidAnswerResponse(t *testing.T) {
-	controller := NewContestController(services.NewContestService(nil, nil))
+	controller := NewContestController(services.NewContestService(nil, nil), nil)
 	for _, action := range []string{"create", "update"} {
 		t.Run(action, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
@@ -167,7 +167,7 @@ func TestHandleConsolidateContest(t *testing.T) {
 				}, nil
 			},
 		}
-		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil))
+		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil), nil)
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/admin/contest/cid-123/consolidate?regrade=true&force=true", nil)
 		ctx := echo.New().NewContext(req, recorder)
@@ -189,7 +189,7 @@ func TestHandleConsolidateContest(t *testing.T) {
 	})
 
 	t.Run("missing contest id", func(t *testing.T) {
-		controller := NewContestController(services.NewContestService(nil, nil))
+		controller := NewContestController(services.NewContestService(nil, nil), nil)
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/admin/contest//consolidate", nil)
 		ctx := echo.New().NewContext(req, recorder)
@@ -207,7 +207,7 @@ func TestHandleConsolidateContest(t *testing.T) {
 				return nil, common.ContestNotFoundError
 			},
 		}
-		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil))
+		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil), nil)
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/admin/contest/missing/consolidate", nil)
 		ctx := echo.New().NewContext(req, recorder)
@@ -228,7 +228,7 @@ func TestHandleConsolidateContest(t *testing.T) {
 				return nil, common.ErrContestNotClosed
 			},
 		}
-		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil))
+		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil), nil)
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/admin/contest/cid-123/consolidate", nil)
 		ctx := echo.New().NewContext(req, recorder)
@@ -249,7 +249,7 @@ func TestHandleConsolidateContest(t *testing.T) {
 				return nil, common.ErrPendingSubmissionsExist
 			},
 		}
-		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil))
+		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil), nil)
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/admin/contest/cid-123/consolidate", nil)
 		ctx := echo.New().NewContext(req, recorder)
@@ -270,7 +270,7 @@ func TestHandleConsolidateContest(t *testing.T) {
 				return nil, errors.New("db query failed")
 			},
 		}
-		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil))
+		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil), nil)
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/admin/contest/cid-123/consolidate", nil)
 		ctx := echo.New().NewContext(req, recorder)
@@ -352,7 +352,7 @@ func TestProblemVisibilityBeforeStartAndRegistration(t *testing.T) {
 				},
 				Problems: visibilityProblemStore{},
 			}
-			controller := NewContestController(services.NewContestService(storage, nil))
+			controller := NewContestController(services.NewContestService(storage, nil), nil)
 
 			// Test problem list endpoint
 			{

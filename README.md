@@ -23,10 +23,10 @@ make swagger
 - Add `DB_ADDR` to `.env`
 - Run these commands from the backend directory. Include `$HOME/go/bin` in `PATH`
   if `migrate` was installed with `go install`.
-- The current schema requires migrations through `000032`: submission cooldowns
+- The current schema requires migrations through `000034`: submission cooldowns
   (`000027`), saved final ranks (`000028`), internal compiler diagnostics (`000029`),
-  Judge0 recovery state (`000030`), ordered recovery claims (`000031`), and a
-  single recovery deadline with the superseded polling index removed (`000032`).
+  Judge0 recovery state (`000030`), ordered recovery claims (`000031`), a single recovery deadline
+  (`000032`), and Dolos plagiarism report and review state (`000033`–`000034`).
   `make migrate-up` applies only pending migrations; do not force the version or
   roll back a production database.
 
@@ -245,7 +245,23 @@ five-idle database pool settings, and keep Run disabled during initial validatio
 Test 600 clients with the actual testcase counts, representative languages, bursty
 submissions and delayed results. Check time to drain, rejected requests, CPU/memory,
 database waits and final scores; then repeat with Run before enabling it. Synthetic
-S3/Judge0 tests and increasing the queue cap alone cannot establish fleet capacity.
+### Dolos plagiarism checks
+
+When `DOLOS_API_URL` is configured, a background worker runs every 15 seconds to identify ended contests
+that have reached a 30-second settling window. For each problem and supported language (Python, C++, C, Java,
+JavaScript, Go), the worker archives the latest code submission for each contestant into a separate comparison
+dataset. Groups with fewer than two distinct contestants are skipped.
+
+Set `DOLOS_API_URL` to `https://dolos.ugent.be/api` for the public Dolos API or to a self-hosted Dolos API endpoint.
+Leaving `DOLOS_API_URL` empty disables automated checks. Note that public reports are accessible by anyone holding
+the report URL, and the public Dolos service enforces a strict 10 MB archive limit.
+
+Admin REST APIs:
+- `GET /admin/contest/{id}/plagiarism`: Retrieves overall status, public report URL (if ready), and individual per-problem/language report statuses.
+- `GET /admin/contest/{id}/plagiarism/pairs`: Retrieves matching submission pairs across finished problem reports with similarity metrics and human review decisions.
+- `PATCH /admin/contest/{id}/plagiarism/pairs/{pairKey}`: Records human review decisions (`cleared`, `confirmed`, `unreviewed`) with an optional note (up to 1000 characters) for a verified pair in the report evidence.
+
+Apply migrations `000033` and `000034` before deploying. Note that frontend UI integration for Dolos is not yet shipped; these endpoints are accessible via admin API clients.
 
 ### Local connection to the EC2 judge
 
