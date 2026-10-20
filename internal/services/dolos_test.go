@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"app/internal/models/dto"
 )
 
 func TestDolosCSVHeaderAndPathParsing(t *testing.T) {
@@ -70,11 +72,36 @@ func TestDolosCSVHeaderAndPathParsing(t *testing.T) {
 	}
 }
 
+func TestDolosOverallStatus(t *testing.T) {
+	tests := []struct {
+		name     string
+		statuses []string
+		want     string
+	}{
+		{name: "purged is failed", statuses: []string{"purged"}, want: "failed"},
+		{name: "unknown remains running", statuses: []string{"unknown"}, want: "processing"},
+		{name: "running masks failure", statuses: []string{"failed", "running"}, want: "processing"},
+		{name: "all skipped", statuses: []string{"skipped", "skipped"}, want: "skipped"},
+		{name: "finished and skipped", statuses: []string{"finished", "skipped"}, want: "finished"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reports := make([]dto.ProblemReportSummary, len(tc.statuses))
+			for i, status := range tc.statuses {
+				reports[i].Status = status
+			}
+			if got := dolosOverallStatus(reports); got != tc.want {
+				t.Errorf("dolosOverallStatus() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDolosCanonicalPathExtraction(t *testing.T) {
 	cases := []struct {
-		input         string
-		expectedPath  string
-		expectedUser  string
+		input        string
+		expectedPath string
+		expectedUser string
 	}{
 		{
 			input:        "/tmp/dolos-unzip-123/usr-42/problemA_sub12345678.py",
