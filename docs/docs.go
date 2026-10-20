@@ -637,6 +637,15 @@ const docTemplate = `{
                             }
                         }
                     },
+                    "404": {
+                        "description": "User not registered or not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
                     "500": {
                         "description": "Internal server error",
                         "schema": {
@@ -2548,13 +2557,22 @@ const docTemplate = `{
                 "department": {
                     "type": "string"
                 },
+                "disqualified": {
+                    "type": "boolean"
+                },
                 "email": {
                     "type": "string"
+                },
+                "hidden": {
+                    "type": "boolean"
                 },
                 "name": {
                     "type": "string"
                 },
                 "registered_at": {
+                    "type": "integer"
+                },
+                "score": {
                     "type": "integer"
                 },
                 "user_id": {
