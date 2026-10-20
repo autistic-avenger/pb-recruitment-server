@@ -402,7 +402,7 @@ func TestHandleUpdateLeaderboardUser(t *testing.T) {
 				return nil
 			},
 		}
-		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil))
+		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil), nil)
 		recorder := httptest.NewRecorder()
 		body := `{"hidden": true}`
 		req := httptest.NewRequest(http.MethodPut, "/admin/cid-123/leaderboard/uid-456", strings.NewReader(body))
@@ -423,7 +423,7 @@ func TestHandleUpdateLeaderboardUser(t *testing.T) {
 	})
 
 	t.Run("missing contest or user id", func(t *testing.T) {
-		controller := NewContestController(services.NewContestService(nil, nil))
+		controller := NewContestController(services.NewContestService(nil, nil), nil)
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPut, "/admin//leaderboard/uid-456", strings.NewReader(`{"hidden": true}`))
 		req.Header.Set("Content-Type", "application/json")
@@ -440,7 +440,7 @@ func TestHandleUpdateLeaderboardUser(t *testing.T) {
 	})
 
 	t.Run("empty update fields", func(t *testing.T) {
-		controller := NewContestController(services.NewContestService(nil, nil))
+		controller := NewContestController(services.NewContestService(nil, nil), nil)
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPut, "/admin/cid-123/leaderboard/uid-456", strings.NewReader(`{}`))
 		req.Header.Set("Content-Type", "application/json")
@@ -462,7 +462,7 @@ func TestHandleUpdateLeaderboardUser(t *testing.T) {
 				return common.UserNotRegisteredError
 			},
 		}
-		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil))
+		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil), nil)
 		recorder := httptest.NewRecorder()
 		body := `{"disqualified": true}`
 		req := httptest.NewRequest(http.MethodPut, "/admin/cid-123/leaderboard/unknown-user", strings.NewReader(body))
@@ -485,7 +485,7 @@ func TestHandleUpdateLeaderboardUser(t *testing.T) {
 				return errors.New("db connection failed")
 			},
 		}
-		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil))
+		controller := NewContestController(services.NewContestService(&stores.Storage{Rankings: rankStore}, nil), nil)
 		recorder := httptest.NewRecorder()
 		body := `{"hidden": true}`
 		req := httptest.NewRequest(http.MethodPut, "/admin/cid-123/leaderboard/uid-456", strings.NewReader(body))
