@@ -464,7 +464,7 @@ func (d *DolosService) loadSubmissionUsers(ctx context.Context, subIDs map[strin
 	}
 
 	rows, err := d.db.QueryContext(ctx, `
-		SELECT s.id::text, s.user_id::text, COALESCE(u.name, '')
+		SELECT s.id::text, COALESCE(u.id::text, ''), COALESCE(u.name, '')
 		FROM submissions s
 		LEFT JOIN users u ON u.id = s.user_id
 		WHERE s.id = ANY($1)
