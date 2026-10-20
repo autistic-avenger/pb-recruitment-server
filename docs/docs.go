@@ -498,7 +498,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Get matching contestant submission pairs detected by Dolos with similarity scores and review statuses",
+                "description": "Get matching contestant submission pairs detected by Dolos with similarity scores and review statuses. Returns up to the top 1,000 candidate pairs per problem/language group with similarity \u003e= 20% (0.20), sorted by similarity descending. Sets response headers X-Total-Count, X-Truncated, X-Max-Pairs-Per-Report, and X-Min-Similarity. For complete un-truncated pair evidence beyond 1,000 pairs, inspect the per-group report URL via GET /admin/contest/{id}/plagiarism.",
                 "produces": [
                     "application/json"
                 ],
