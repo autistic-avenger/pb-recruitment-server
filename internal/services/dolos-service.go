@@ -151,17 +151,10 @@ func (d *DolosService) GetReport(ctx context.Context, contestID string) (*DolosR
 		}
 	}
 
-	overallStatus := dolosOverallStatus(reports)
-
-	var combinedErr string
-	if len(errMsgs) > 0 {
-		combinedErr = strings.Join(errMsgs, "; ")
-	}
-
 	return &DolosReport{
-		Status:    overallStatus,
+		Status:    dolosOverallStatus(reports),
 		ReportURL: firstURL,
-		Error:     combinedErr,
+		Error:     strings.Join(errMsgs, "; "),
 		Reports:   reports,
 	}, nil
 }
@@ -1070,16 +1063,8 @@ func (d *DolosService) saveGroupError(ctx context.Context, contestID, problemID,
 	return nil
 }
 
-func (d *DolosService) listSources(ctx context.Context, contestID string) ([]dolosSource, error) {
-	return listSourcesTx(ctx, d.db, contestID)
-}
-
-type dolosQueryer interface {
-	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-}
-
-func listSourcesTx(ctx context.Context, q dolosQueryer, contestID string) ([]dolosSource, error) {
-	rows, err := q.QueryContext(ctx, `
+func listSourcesTx(ctx context.Context, tx *sql.Tx, contestID string) ([]dolosSource, error) {
+	rows, err := tx.QueryContext(ctx, `
 		SELECT DISTINCT ON (user_id, problem_id)
 			id::text, user_id::text, problem_id::text, COALESCE(language, '')
 		FROM submissions

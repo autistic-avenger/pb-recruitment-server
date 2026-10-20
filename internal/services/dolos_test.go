@@ -81,6 +81,7 @@ func TestDolosOverallStatus(t *testing.T) {
 		{name: "purged is failed", statuses: []string{"purged"}, want: "failed"},
 		{name: "unknown remains running", statuses: []string{"unknown"}, want: "processing"},
 		{name: "running masks failure", statuses: []string{"failed", "running"}, want: "processing"},
+		{name: "uploading masks failure", statuses: []string{"uploading", "failed"}, want: "processing"},
 		{name: "all skipped", statuses: []string{"skipped", "skipped"}, want: "skipped"},
 		{name: "finished and skipped", statuses: []string{"finished", "skipped"}, want: "finished"},
 	}
@@ -146,7 +147,7 @@ func TestCanonicalLanguage(t *testing.T) {
 		{"javascript", "javascript"},
 		{"js", "javascript"},
 		{"golang", "go"},
-		{"rust", ""},   // unsupported submission languages return empty
+		{"rust", ""}, // unsupported submission languages return empty
 		{"ruby", ""},
 		{"swift", ""},
 	}
