@@ -16,7 +16,11 @@ func TestDolosCSVHeaderAndPathParsing(t *testing.T) {
 		"2,/tmp/dolos-unzip-xyz/userC/prob1_sub789.py,/tmp/dolos-unzip-xyz/userD/prob1_sub012.py,0.75,80,25\n"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/reports/rep-123/data/pairs" {
+		if r.URL.Path == "/reports/rep-123/data/pairs.csv" {
+			http.Redirect(w, r, "/blobs/pairs.csv", http.StatusFound)
+			return
+		}
+		if r.URL.Path == "/blobs/pairs.csv" {
 			w.Header().Set("Content-Type", "text/csv")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(csvContent))
@@ -156,6 +160,28 @@ func TestCanonicalLanguage(t *testing.T) {
 		res := canonicalLanguage(tc.lang)
 		if res != tc.expected {
 			t.Errorf("canonicalLanguage(%q) = %q; want %q", tc.lang, res, tc.expected)
+		}
+	}
+}
+
+func TestLanguageExtension(t *testing.T) {
+	tests := []struct {
+		lang string
+		want string
+	}{
+		{"python", ".py"},
+		{"cpp", ".cpp"},
+		{"c", ".c"},
+		{"java", ".java"},
+		{"javascript", ".js"},
+		{"go", ".go"},
+		{"unknown", ".txt"},
+	}
+
+	for _, tc := range tests {
+		got := languageExtension(tc.lang)
+		if got != tc.want {
+			t.Errorf("languageExtension(%q) = %q, want %q", tc.lang, got, tc.want)
 		}
 	}
 }

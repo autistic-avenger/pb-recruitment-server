@@ -2,6 +2,7 @@ package services
 
 import (
 	"app/internal/common"
+	"app/internal/judge0"
 	"app/internal/models/dto"
 	"app/internal/s3"
 	"archive/zip"
@@ -139,13 +140,8 @@ func (d *DolosService) GetReport(ctx context.Context, contestID string) (*DolosR
 		}, nil
 	}
 
-	var firstURL string
 	var errMsgs []string
-
 	for _, r := range reports {
-		if r.ReportURL != "" && firstURL == "" {
-			firstURL = r.ReportURL
-		}
 		if r.Error != "" {
 			errMsgs = append(errMsgs, fmt.Sprintf("%s/%s: %s", r.ProblemID, r.Language, r.Error))
 		}
@@ -153,7 +149,6 @@ func (d *DolosService) GetReport(ctx context.Context, contestID string) (*DolosR
 
 	return &DolosReport{
 		Status:    dolosOverallStatus(reports),
-		ReportURL: firstURL,
 		Error:     strings.Join(errMsgs, "; "),
 		Reports:   reports,
 	}, nil
@@ -297,50 +292,52 @@ func (d *DolosService) GetPairs(ctx context.Context, contestID string, page int)
 	if len(allPairs) == 0 {
 		return []dto.PlagiarismPair{}, nil
 	}
-	reviews, err := d.loadContestReviews(ctx, contestID)
+	reviewsByReport, reviewsByKey, err := d.loadContestReviews(ctx, contestID)
 	if err != nil {
 		return nil, err
 	}
 
-	userIDs := make(map[string]bool)
+	subIDs := make(map[string]bool)
 	for i := range allPairs {
-		if rev, ok := reviews[allPairs[i].ReportID+"|"+allPairs[i].Key]; ok {
+		if rev, ok := reviewsByReport[allPairs[i].ReportID+"|"+allPairs[i].Key]; ok {
+			allPairs[i].ReviewStatus, allPairs[i].ReviewNote = rev.status, rev.note
+		} else if rev, ok := reviewsByKey[allPairs[i].Key]; ok {
+			// Preserve earlier human reviews across report regenerations
 			allPairs[i].ReviewStatus, allPairs[i].ReviewNote = rev.status, rev.note
 		} else {
 			allPairs[i].ReviewStatus = "unreviewed"
 		}
 		if allPairs[i].LeftUserID != "" {
-			userIDs[allPairs[i].LeftUserID] = true
+			subIDs[allPairs[i].LeftUserID] = true
 		}
 		if allPairs[i].RightUserID != "" {
-			userIDs[allPairs[i].RightUserID] = true
+			subIDs[allPairs[i].RightUserID] = true
 		}
 	}
 
-	userNames, err := d.loadUserNames(ctx, userIDs)
+	subUsers, err := d.loadSubmissionUsers(ctx, subIDs)
 	if err != nil {
 		return nil, err
 	}
 	for i := range allPairs {
-		if name, ok := userNames[allPairs[i].LeftUserID]; ok {
-			allPairs[i].LeftName = name
+		if info, ok := subUsers[allPairs[i].LeftUserID]; ok {
+			allPairs[i].LeftUserID = info.userID
+			allPairs[i].LeftName = info.name
 		}
-		if name, ok := userNames[allPairs[i].RightUserID]; ok {
-			allPairs[i].RightName = name
+		if info, ok := subUsers[allPairs[i].RightUserID]; ok {
+			allPairs[i].RightUserID = info.userID
+			allPairs[i].RightName = info.name
 		}
 	}
 
 	sort.Slice(allPairs, func(i, j int) bool {
-		if allPairs[i].Key == allPairs[j].Key {
+		if allPairs[i].Similarity != allPairs[j].Similarity {
 			return allPairs[i].Similarity > allPairs[j].Similarity
 		}
 		return allPairs[i].Key < allPairs[j].Key
 	})
 	// The API remains a plain array; page is a stable zero-based offset page.
 	const pageSize = 100
-	if page > len(allPairs)/pageSize {
-		return []dto.PlagiarismPair{}, nil
-	}
 	start := page * pageSize
 	if start >= len(allPairs) {
 		return []dto.PlagiarismPair{}, nil
@@ -355,58 +352,71 @@ type reviewData struct {
 	note   string
 }
 
-func (d *DolosService) loadContestReviews(ctx context.Context, contestID string) (map[string]reviewData, error) {
+func (d *DolosService) loadContestReviews(ctx context.Context, contestID string) (byReport map[string]reviewData, byKey map[string]reviewData, err error) {
 	rows, err := d.db.QueryContext(ctx, `
-		SELECT report_id || '|' || pair_key, status, note
+		SELECT report_id, pair_key, status, note
 		FROM contest_plagiarism_pair_reviews
 		WHERE contest_id = $1
+		ORDER BY updated_at ASC
 	`, contestID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
-	out := make(map[string]reviewData)
+	byReport = make(map[string]reviewData)
+	byKey = make(map[string]reviewData)
 	for rows.Next() {
-		var key, status, note string
-		if err := rows.Scan(&key, &status, &note); err != nil {
-			return nil, err
+		var reportID, pairKey, status, note string
+		if err := rows.Scan(&reportID, &pairKey, &status, &note); err != nil {
+			return nil, nil, err
 		}
-		out[key] = reviewData{status: status, note: note}
+		rd := reviewData{status: status, note: note}
+		byReport[reportID+"|"+pairKey] = rd
+		byKey[pairKey] = rd
 	}
-	return out, rows.Err()
+	return byReport, byKey, rows.Err()
 }
 
-func (d *DolosService) loadUserNames(ctx context.Context, userIDs map[string]bool) (map[string]string, error) {
-	out := make(map[string]string)
-	if len(userIDs) == 0 {
+type userSubInfo struct {
+	userID string
+	name   string
+}
+
+func (d *DolosService) loadSubmissionUsers(ctx context.Context, subIDs map[string]bool) (map[string]userSubInfo, error) {
+	out := make(map[string]userSubInfo)
+	if len(subIDs) == 0 {
 		return out, nil
 	}
 
-	ids := make([]string, 0, len(userIDs))
-	for id := range userIDs {
+	ids := make([]string, 0, len(subIDs))
+	for id := range subIDs {
 		ids = append(ids, id)
 	}
 
-	query := `SELECT id::text, name FROM users WHERE id = ANY($1)`
-	rows, err := d.db.QueryContext(ctx, query, ids)
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT s.id::text, s.user_id::text, COALESCE(u.name, '')
+		FROM submissions s
+		LEFT JOIN users u ON u.id = s.user_id
+		WHERE s.id = ANY($1)
+	`, ids)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		var id, name string
-		if err := rows.Scan(&id, &name); err != nil {
+		var subID, userID, name string
+		if err := rows.Scan(&subID, &userID, &name); err != nil {
 			return nil, err
 		}
-		out[id] = name
+		out[subID] = userSubInfo{userID: userID, name: name}
 	}
 	return out, rows.Err()
 }
 
 func (d *DolosService) fetchReportPairs(ctx context.Context, reportID string) ([]dto.PlagiarismPair, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.baseURL+"/reports/"+url.PathEscape(reportID)+"/data/pairs", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.baseURL+"/reports/"+url.PathEscape(reportID)+"/data/pairs.csv", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -660,9 +670,15 @@ func (d *DolosService) process(ctx context.Context) error {
 		 NOT EXISTS (SELECT 1 FROM contest_plagiarism_runs r WHERE r.contest_id=c.id)
 		 OR EXISTS (
 		   SELECT 1 FROM contest_plagiarism_runs r WHERE r.contest_id=c.id AND
-		   (r.analyzed_end_time<>c.end_time OR r.source_count<>(SELECT COUNT(*) FROM submissions s WHERE s.contest_id=c.id AND s.type='code') OR r.latest_submission_at<>COALESCE((SELECT MAX(created_at) FROM submissions s WHERE s.contest_id=c.id AND s.type='code'),0))
+		   r.analyzed_end_time<>c.end_time
 		 )
-			 OR EXISTS (SELECT 1 FROM contest_plagiarism_reports p WHERE p.contest_id=c.id AND ((p.status='pending' AND p.next_retry_at<=NOW()) OR (p.status IN ('processing','uploading') AND p.updated_at<NOW()-INTERVAL '3 minutes') OR (p.status IN ('queued','running','unknown') AND p.dolos_report_id IS NOT NULL AND p.next_retry_at<=NOW())))
+		 OR EXISTS (
+		   SELECT 1 FROM contest_plagiarism_reports p WHERE p.contest_id=c.id AND (
+		     (p.status='pending' AND p.next_retry_at<=NOW())
+		     OR (p.status IN ('processing','uploading') AND p.updated_at<NOW()-INTERVAL '3 minutes')
+		     OR (p.status IN ('queued','running','unknown') AND p.dolos_report_id IS NOT NULL AND p.next_retry_at<=NOW())
+		   )
+		 )
 		)
 		ORDER BY end_time, id
 		LIMIT 20
@@ -719,7 +735,7 @@ func (d *DolosService) processContest(ctx context.Context, contestID, contestNam
 	}
 	defer tx.Rollback()
 	var currentEndTime int64
-	if err := tx.QueryRowContext(ctx, `SELECT end_time FROM contests WHERE id=$1 FOR UPDATE`, contestID).Scan(&currentEndTime); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT end_time FROM contests WHERE id=$1 FOR NO KEY UPDATE`, contestID).Scan(&currentEndTime); err != nil {
 		return err
 	}
 	if currentEndTime != expectedEndTime || currentEndTime > time.Now().Add(-30*time.Second).UnixMilli() {
@@ -810,8 +826,8 @@ func (d *DolosService) processContest(ctx context.Context, contestID, contestNam
 			continue
 		}
 		const maxZipLimit = 10 * 1024 * 1024
-		if len(archive) >= maxZipLimit {
-			permErr := fmt.Errorf("Dolos archive size (%d bytes) reaches or exceeds 10 MB limit", len(archive))
+		if len(archive) > maxZipLimit {
+			permErr := fmt.Errorf("Dolos archive size (%d bytes) exceeds 10 MB limit", len(archive))
 			if saveErr := d.saveGroupError(ctx, contestID, k.problemID, k.language, claimToken, permErr, true); saveErr != nil {
 				return saveErr
 			}
@@ -824,7 +840,7 @@ func (d *DolosService) processContest(ctx context.Context, contestID, contestNam
 			return err
 		}
 		var uploadEnd int64
-		if err = uploadTx.QueryRowContext(ctx, `SELECT end_time FROM contests WHERE id=$1 FOR UPDATE`, contestID).Scan(&uploadEnd); err != nil {
+		if err = uploadTx.QueryRowContext(ctx, `SELECT end_time FROM contests WHERE id=$1 FOR NO KEY UPDATE`, contestID).Scan(&uploadEnd); err != nil {
 			uploadTx.Rollback()
 			return err
 		}
@@ -833,12 +849,7 @@ func (d *DolosService) processContest(ctx context.Context, contestID, contestNam
 			uploadTx.Rollback()
 			return err
 		}
-		boundarySources, sourceErr := listSourcesTx(ctx, uploadTx, contestID)
-		if sourceErr != nil {
-			uploadTx.Rollback()
-			return sourceErr
-		}
-		if uploadEnd != currentEndTime || uploadEnd > time.Now().Add(-30*time.Second).UnixMilli() || sourceSignature(uploadEnd, boundarySources) != signature || runSignature != signature {
+		if uploadEnd != currentEndTime || uploadEnd > time.Now().Add(-30*time.Second).UnixMilli() || runSignature != signature {
 			uploadTx.Rollback()
 			continue
 		}
@@ -860,7 +871,7 @@ func (d *DolosService) processContest(ctx context.Context, contestID, contestNam
 			return err
 		}
 
-		reportName := fmt.Sprintf("%s - %s - %s", contestName, k.problemID, k.language)
+		reportName := fmt.Sprintf("analysis-%s-%s-%s", contestID, k.problemID, k.language)
 		remote, err := d.createReport(ctx, reportName, archive)
 		if err != nil {
 			var uploadErr *dolosUploadError
@@ -907,6 +918,11 @@ func (d *DolosService) pollActiveReports(ctx context.Context, contestID string) 
 	if _, err := d.db.ExecContext(ctx, `UPDATE contest_plagiarism_reports SET status='failed', error='Dolos processing exhausted maximum claims', claim_token=NULL, updated_at=NOW() WHERE contest_id=$1 AND status='processing' AND updated_at<NOW()-INTERVAL '3 minutes' AND attempts>=6`, contestID); err != nil {
 		return err
 	}
+
+	if _, err := d.db.ExecContext(ctx, `UPDATE contest_plagiarism_reports SET status='failed', error='Dolos report timed out after 30 minutes in queued/running state', updated_at=NOW() WHERE contest_id=$1 AND status IN ('queued','running','unknown') AND dolos_report_id IS NOT NULL AND created_at < NOW()-INTERVAL '30 minutes'`, contestID); err != nil {
+		return err
+	}
+
 	rows, err := d.db.QueryContext(ctx, `
 		SELECT problem_id, language, dolos_report_id, attempts
 		FROM contest_plagiarism_reports
@@ -1068,7 +1084,7 @@ func listSourcesTx(ctx context.Context, tx *sql.Tx, contestID string) ([]dolosSo
 		SELECT DISTINCT ON (user_id, problem_id)
 			id::text, user_id::text, problem_id::text, COALESCE(language, '')
 		FROM submissions
-		WHERE contest_id = $1 AND type = 'code'
+		WHERE contest_id = $1 AND type = 'code' AND status <> 'judge_error'
 		ORDER BY user_id, problem_id, created_at DESC, id DESC
 	`, contestID)
 	if err != nil {
@@ -1091,23 +1107,29 @@ func listSourcesTx(ctx context.Context, tx *sql.Tx, contestID string) ([]dolosSo
 	return out, rows.Err()
 }
 
+type dolosLangMeta struct {
+	canonical string
+	extension string
+}
+
+var judge0LangToDolos = map[int]dolosLangMeta{
+	71: {canonical: "python", extension: ".py"},
+	54: {canonical: "cpp", extension: ".cpp"},
+	50: {canonical: "c", extension: ".c"},
+	62: {canonical: "java", extension: ".java"},
+	63: {canonical: "javascript", extension: ".js"},
+	60: {canonical: "go", extension: ".go"},
+}
+
 func canonicalLanguage(lang string) string {
-	switch strings.ToLower(strings.TrimSpace(lang)) {
-	case "python", "python3", "py":
-		return "python"
-	case "cpp", "c++":
-		return "cpp"
-	case "c":
-		return "c"
-	case "java":
-		return "java"
-	case "javascript", "js", "node":
-		return "javascript"
-	case "go", "golang":
-		return "go"
-	default:
+	id, err := judge0.LanguageID(lang)
+	if err != nil {
 		return ""
 	}
+	if meta, ok := judge0LangToDolos[id]; ok {
+		return meta.canonical
+	}
+	return ""
 }
 
 func (d *DolosService) makeArchive(ctx context.Context, sources []dolosSource) ([]byte, error) {
@@ -1117,9 +1139,18 @@ func (d *DolosService) makeArchive(ctx context.Context, sources []dolosSource) (
 	const maxObjectBytes = 1024 * 1024 // 1 MB per source code max
 	const maxArchiveBytes = 10 * 1024 * 1024
 
+	var skipped int
+
 	for _, s := range sources {
 		code, err := d.s3.GetObjectLimit(ctx, s.id, maxObjectBytes)
 		if err != nil {
+			if errors.Is(err, common.KeyNotFoundError) {
+				// A missing object (e.g. from a failed S3 write after row insert)
+				// should not abort the entire group. Skip and count it.
+				log.Warnf("Dolos archive: skipping missing source %s: %v", s.id, err)
+				skipped++
+				continue
+			}
 			zw.Close()
 			return nil, fmt.Errorf("read source %s: %w", s.id, err)
 		}
@@ -1131,7 +1162,9 @@ func (d *DolosService) makeArchive(ctx context.Context, sources []dolosSource) (
 		}
 
 		ext := languageExtension(s.language)
-		name := path.Join(s.userID, s.problemID+"_"+s.id+ext)
+		// Use submission ID as the directory to avoid leaking user identifiers
+		// to the external Dolos provider. Users are resolved locally via submissions.id.
+		name := path.Join(s.id, s.problemID+"_"+s.id+ext)
 
 		f, err := zw.Create(name)
 		if err != nil {
@@ -1147,6 +1180,10 @@ func (d *DolosService) makeArchive(ctx context.Context, sources []dolosSource) (
 			zw.Close()
 			return nil, fmt.Errorf("archive size exceeds 10 MB limit while packaging")
 		}
+	}
+
+	if skipped > 0 {
+		log.Warnf("Dolos archive: skipped %d missing sources out of %d total", skipped, len(sources))
 	}
 
 	if err := zw.Close(); err != nil {
@@ -1253,23 +1290,13 @@ func (d *DolosService) createReport(ctx context.Context, name string, archive []
 	return &result, nil
 }
 
-func languageExtension(language string) string {
-	switch strings.ToLower(strings.TrimSpace(language)) {
-	case "python", "python3", "py":
-		return ".py"
-	case "cpp", "c++":
-		return ".cpp"
-	case "c":
-		return ".c"
-	case "java":
-		return ".java"
-	case "javascript", "js", "node":
-		return ".js"
-	case "go", "golang":
-		return ".go"
-	default:
-		return ".txt"
+func languageExtension(canonicalLang string) string {
+	for _, meta := range judge0LangToDolos {
+		if meta.canonical == canonicalLang {
+			return meta.extension
+		}
 	}
+	return ".txt"
 }
 
 func NewDolosWorker(lc fx.Lifecycle, d *DolosService) {
