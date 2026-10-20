@@ -270,9 +270,8 @@ Apply migration `000033` before deploying. Pair review PATCH requests must inclu
 If an upload was interrupted or failed due to transient provider errors, reset the plagiarism state for that contest using:
 
 ```sql
-DELETE FROM contest_plagiarism_runs WHERE contest_id = '<contest_id>';
 UPDATE contest_plagiarism_reports
-SET status = 'pending', attempts = 0, claim_token = NULL, error = NULL, next_retry_at = NOW(), updated_at = NOW()
+SET status = 'pending', attempts = 0, claim_token = NULL, error = NULL, next_retry_at = NOW(), uploaded_at = NULL, updated_at = NOW()
 WHERE contest_id = '<contest_id>' AND status IN ('failed', 'error');
 ```
 

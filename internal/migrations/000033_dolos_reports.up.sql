@@ -18,6 +18,7 @@ CREATE TABLE contest_plagiarism_reports (
     claim_token TEXT,
     attempts INT NOT NULL DEFAULT 0,
     next_retry_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    uploaded_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (contest_id, problem_id, language)

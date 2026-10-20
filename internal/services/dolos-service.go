@@ -7,6 +7,7 @@ import (
 	"app/internal/s3"
 	"archive/zip"
 	"bytes"
+	"container/heap"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -27,6 +28,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/labstack/gommon/log"
@@ -34,10 +36,12 @@ import (
 )
 
 type DolosService struct {
-	db      *sql.DB
-	s3      *s3.S3
-	client  *http.Client
-	baseURL string
+	db           *sql.DB
+	s3           *s3.S3
+	client       *http.Client
+	baseURL      string
+	pairsCache   map[string][]dto.PlagiarismPair
+	pairsCacheMu sync.RWMutex
 }
 
 type DolosReport = dto.DolosContestReportResponse
@@ -69,11 +73,44 @@ type dolosSource struct {
 func NewDolosService(db *sql.DB, objectStore *s3.S3) *DolosService {
 	base := strings.TrimRight(os.Getenv("DOLOS_API_URL"), "/")
 	return &DolosService{
-		db:      db,
-		s3:      objectStore,
-		baseURL: base,
-		client:  &http.Client{Timeout: 65 * time.Second},
+		db:         db,
+		s3:         objectStore,
+		baseURL:    base,
+		client:     &http.Client{Timeout: 65 * time.Second},
+		pairsCache: make(map[string][]dto.PlagiarismPair),
 	}
+}
+
+func (d *DolosService) getCachedPairs(reportID string) ([]dto.PlagiarismPair, bool) {
+	d.pairsCacheMu.RLock()
+	defer d.pairsCacheMu.RUnlock()
+	if d.pairsCache == nil {
+		return nil, false
+	}
+	pairs, ok := d.pairsCache[reportID]
+	if !ok {
+		return nil, false
+	}
+	out := make([]dto.PlagiarismPair, len(pairs))
+	copy(out, pairs)
+	return out, true
+}
+
+func (d *DolosService) setCachedPairs(reportID string, pairs []dto.PlagiarismPair) {
+	d.pairsCacheMu.Lock()
+	defer d.pairsCacheMu.Unlock()
+	if d.pairsCache == nil {
+		d.pairsCache = make(map[string][]dto.PlagiarismPair)
+	}
+	if len(d.pairsCache) >= 100 {
+		for k := range d.pairsCache {
+			delete(d.pairsCache, k)
+			break
+		}
+	}
+	copied := make([]dto.PlagiarismPair, len(pairs))
+	copy(copied, pairs)
+	d.pairsCache[reportID] = copied
 }
 
 func generateClaimToken() string {
@@ -148,9 +185,9 @@ func (d *DolosService) GetReport(ctx context.Context, contestID string) (*DolosR
 	}
 
 	return &DolosReport{
-		Status:    dolosOverallStatus(reports),
-		Error:     strings.Join(errMsgs, "; "),
-		Reports:   reports,
+		Status:  dolosOverallStatus(reports),
+		Error:   strings.Join(errMsgs, "; "),
+		Reports: reports,
 	}, nil
 }
 
@@ -323,10 +360,16 @@ func (d *DolosService) GetPairs(ctx context.Context, contestID string, page int)
 		if info, ok := subUsers[allPairs[i].LeftUserID]; ok {
 			allPairs[i].LeftUserID = info.userID
 			allPairs[i].LeftName = info.name
+		} else {
+			allPairs[i].LeftUserID = ""
+			allPairs[i].LeftName = ""
 		}
 		if info, ok := subUsers[allPairs[i].RightUserID]; ok {
 			allPairs[i].RightUserID = info.userID
 			allPairs[i].RightName = info.name
+		} else {
+			allPairs[i].RightUserID = ""
+			allPairs[i].RightName = ""
 		}
 	}
 
@@ -415,7 +458,46 @@ func (d *DolosService) loadSubmissionUsers(ctx context.Context, subIDs map[strin
 	return out, rows.Err()
 }
 
+type pairMinHeap []dto.PlagiarismPair
+
+func (h pairMinHeap) Len() int           { return len(h) }
+func (h pairMinHeap) Less(i, j int) bool { return h[i].Similarity < h[j].Similarity }
+func (h pairMinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *pairMinHeap) Push(x any)        { *h = append(*h, x.(dto.PlagiarismPair)) }
+func (h *pairMinHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[0 : n-1]
+	return x
+}
+
+type limitedCountingReader struct {
+	r     io.Reader
+	limit int64
+	read  int64
+}
+
+func (l *limitedCountingReader) Read(p []byte) (int, error) {
+	n, err := l.r.Read(p)
+	l.read += int64(n)
+	if l.read > l.limit {
+		return n, fmt.Errorf("Dolos pairs CSV response exceeded maximum byte budget (%d bytes)", l.limit)
+	}
+	return n, err
+}
+
+const (
+	maxPairsBytes          = 64 * 1024 * 1024
+	maxPairsPerReport      = 1000
+	minSimilarityThreshold = 0.20
+)
+
 func (d *DolosService) fetchReportPairs(ctx context.Context, reportID string) ([]dto.PlagiarismPair, error) {
+	if cached, ok := d.getCachedPairs(reportID); ok {
+		return cached, nil
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.baseURL+"/reports/"+url.PathEscape(reportID)+"/data/pairs.csv", nil)
 	if err != nil {
 		return nil, err
@@ -430,17 +512,7 @@ func (d *DolosService) fetchReportPairs(ctx context.Context, reportID string) ([
 		return nil, fmt.Errorf("Dolos pairs request returned HTTP %d", resp.StatusCode)
 	}
 
-	const maxPairsBytes = 64 * 1024 * 1024
-	lr := io.LimitReader(resp.Body, maxPairsBytes+1)
-	bodyBytes, err := io.ReadAll(lr)
-	if err != nil {
-		return nil, err
-	}
-	if len(bodyBytes) > maxPairsBytes {
-		return nil, fmt.Errorf("Dolos pairs CSV response exceeded maximum byte budget (%d bytes)", maxPairsBytes)
-	}
-
-	reader := csv.NewReader(bytes.NewReader(bodyBytes))
+	reader := csv.NewReader(&limitedCountingReader{r: resp.Body, limit: maxPairsBytes})
 	reader.TrimLeadingSpace = true
 	headers, err := reader.Read()
 	if err != nil {
@@ -471,7 +543,9 @@ func (d *DolosService) fetchReportPairs(ctx context.Context, reportID string) ([
 		return nil, fmt.Errorf("Dolos CSV missing required file path or metric headers")
 	}
 
-	var pairs []dto.PlagiarismPair
+	h := &pairMinHeap{}
+	heap.Init(h)
+
 	for {
 		row, err := reader.Read()
 		if err == io.EOF {
@@ -485,22 +559,30 @@ func (d *DolosService) fetchReportPairs(ctx context.Context, reportID string) ([
 			return nil, fmt.Errorf("Dolos CSV row has fewer columns than its header")
 		}
 
+		similarity, err := strconv.ParseFloat(strings.TrimSpace(row[simCol]), 64)
+		if err != nil || math.IsNaN(similarity) || math.IsInf(similarity, 0) || similarity < 0 || similarity > 1 {
+			return nil, fmt.Errorf("Dolos CSV row has invalid similarity")
+		}
+		if similarity < minSimilarityThreshold {
+			continue
+		}
+
+		if h.Len() >= maxPairsPerReport && similarity <= (*h)[0].Similarity {
+			continue
+		}
+
 		rawLeft := strings.TrimSpace(row[leftPathCol])
 		rawRight := strings.TrimSpace(row[rightPathCol])
 		if rawLeft == "" || rawRight == "" {
 			continue
 		}
 
-		canonicalLeft, leftUser := extractCanonicalPathAndUser(rawLeft)
-		canonicalRight, rightUser := extractCanonicalPathAndUser(rawRight)
+		canonicalLeft, leftSubID := extractCanonicalPathAndSubID(rawLeft)
+		canonicalRight, rightSubID := extractCanonicalPathAndSubID(rawRight)
 		if canonicalLeft == "" || canonicalRight == "" {
 			continue
 		}
 
-		similarity, err := strconv.ParseFloat(strings.TrimSpace(row[simCol]), 64)
-		if err != nil || math.IsNaN(similarity) || math.IsInf(similarity, 0) || similarity < 0 || similarity > 1 {
-			return nil, fmt.Errorf("Dolos CSV row has invalid similarity")
-		}
 		totalOverlap, err := strconv.Atoi(strings.TrimSpace(row[overlapCol]))
 		if err != nil || totalOverlap < 0 {
 			return nil, fmt.Errorf("Dolos CSV row has invalid total overlap")
@@ -513,31 +595,47 @@ func (d *DolosService) fetchReportPairs(ctx context.Context, reportID string) ([
 		p := dto.PlagiarismPair{
 			Key:             pairKey(canonicalLeft, canonicalRight),
 			LeftFile:        canonicalLeft,
-			LeftUserID:      leftUser,
+			LeftUserID:      leftSubID,
 			RightFile:       canonicalRight,
-			RightUserID:     rightUser,
+			RightUserID:     rightSubID,
 			Similarity:      similarity,
 			TotalOverlap:    totalOverlap,
 			LongestFragment: longestFragment,
 			ReviewStatus:    "unreviewed",
 		}
-		pairs = append(pairs, p)
+
+		if h.Len() < maxPairsPerReport {
+			heap.Push(h, p)
+		} else {
+			(*h)[0] = p
+			heap.Fix(h, 0)
+		}
 	}
 
-	return pairs, nil
+	result := make([]dto.PlagiarismPair, h.Len())
+	for i := len(result) - 1; i >= 0; i-- {
+		result[i] = heap.Pop(h).(dto.PlagiarismPair)
+	}
+
+	d.setCachedPairs(reportID, result)
+	return result, nil
 }
 
-func extractCanonicalPathAndUser(providerPath string) (canonicalPath, userID string) {
+func extractCanonicalPathAndSubID(providerPath string) (canonicalPath, subID string) {
 	cleaned := path.Clean(strings.ReplaceAll(providerPath, "\\", "/"))
 	parts := strings.Split(cleaned, "/")
 	if len(parts) >= 2 {
-		user := parts[len(parts)-2]
+		subID := parts[len(parts)-2]
 		fileName := parts[len(parts)-1]
-		if user != "" && user != "." && user != ".." && fileName != "" {
-			return user + "/" + fileName, user
+		if subID != "" && subID != "." && subID != ".." && fileName != "" {
+			return subID + "/" + fileName, subID
 		}
 	}
 	return cleaned, ""
+}
+
+func extractCanonicalPathAndUser(providerPath string) (canonicalPath, userID string) {
+	return extractCanonicalPathAndSubID(providerPath)
 }
 
 func pairKey(left, right string) string {
@@ -559,18 +657,80 @@ func sourceSignature(endTime int64, sources []dolosSource) string {
 }
 
 func (d *DolosService) fetchReportPairMembership(ctx context.Context, reportID, key string) (bool, error) {
-	pairs, err := d.fetchReportPairs(ctx, reportID)
+	if cached, ok := d.getCachedPairs(reportID); ok {
+		for _, pair := range cached {
+			if pair.Key == key {
+				return true, nil
+			}
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.baseURL+"/reports/"+url.PathEscape(reportID)+"/data/pairs.csv", nil)
 	if err != nil {
 		return false, err
 	}
-	for _, pair := range pairs {
-		if pair.Key == key {
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("Dolos pairs request returned HTTP %d", resp.StatusCode)
+	}
+
+	reader := csv.NewReader(&limitedCountingReader{r: resp.Body, limit: maxPairsBytes})
+	reader.TrimLeadingSpace = true
+	headers, err := reader.Read()
+	if err != nil {
+		return false, err
+	}
+
+	colIdx := map[string]int{}
+	for i, h := range headers {
+		colIdx[strings.ToLower(strings.TrimSpace(h))] = i
+	}
+	getCol := func(names ...string) (int, bool) {
+		for _, n := range names {
+			if idx, ok := colIdx[strings.ToLower(n)]; ok {
+				return idx, true
+			}
+		}
+		return -1, false
+	}
+	leftPathCol, hasLeft := getCol("leftfilepath", "left_file_path", "left file path")
+	rightPathCol, hasRight := getCol("rightfilepath", "right_file_path", "right file path")
+	if !hasLeft || !hasRight {
+		return false, fmt.Errorf("Dolos CSV missing required file path headers")
+	}
+
+	for {
+		row, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return false, err
+		}
+		if leftPathCol >= len(row) || rightPathCol >= len(row) {
+			continue
+		}
+		rawLeft := strings.TrimSpace(row[leftPathCol])
+		rawRight := strings.TrimSpace(row[rightPathCol])
+		if rawLeft == "" || rawRight == "" {
+			continue
+		}
+		canonicalLeft, _ := extractCanonicalPathAndSubID(rawLeft)
+		canonicalRight, _ := extractCanonicalPathAndSubID(rawRight)
+		if canonicalLeft == "" || canonicalRight == "" {
+			continue
+		}
+		if pairKey(canonicalLeft, canonicalRight) == key {
 			return true, nil
 		}
 	}
 	return false, nil
 }
-
 func (d *DolosService) ReviewPair(ctx context.Context, contestID, key, expectedReportID, status, note string) error {
 	if err := d.checkContestExists(ctx, contestID); err != nil {
 		return err
@@ -670,7 +830,7 @@ func (d *DolosService) process(ctx context.Context) error {
 		 NOT EXISTS (SELECT 1 FROM contest_plagiarism_runs r WHERE r.contest_id=c.id)
 		 OR EXISTS (
 		   SELECT 1 FROM contest_plagiarism_runs r WHERE r.contest_id=c.id AND
-		   r.analyzed_end_time<>c.end_time
+		   (r.analyzed_end_time<>c.end_time OR r.source_count<>(SELECT COUNT(*) FROM submissions s WHERE s.contest_id=c.id AND s.type='code') OR r.latest_submission_at<>COALESCE((SELECT MAX(created_at) FROM submissions s WHERE s.contest_id=c.id AND s.type='code'),0))
 		 )
 		 OR EXISTS (
 		   SELECT 1 FROM contest_plagiarism_reports p WHERE p.contest_id=c.id AND (
@@ -826,7 +986,7 @@ func (d *DolosService) processContest(ctx context.Context, contestID, contestNam
 			continue
 		}
 		const maxZipLimit = 10 * 1024 * 1024
-		if len(archive) > maxZipLimit {
+		if len(archive) >= maxZipLimit {
 			permErr := fmt.Errorf("Dolos archive size (%d bytes) exceeds 10 MB limit", len(archive))
 			if saveErr := d.saveGroupError(ctx, contestID, k.problemID, k.language, claimToken, permErr, true); saveErr != nil {
 				return saveErr
@@ -898,6 +1058,7 @@ func (d *DolosService) processContest(ctx context.Context, contestID, contestNam
 			    error = NULL,
 			    claim_token = NULL,
 			    next_retry_at = NOW() + INTERVAL '15 seconds',
+			    uploaded_at = NOW(),
 			    updated_at = NOW()
 			WHERE contest_id = $1 AND problem_id = $2 AND language = $3 AND claim_token = $4
 		`, contestID, k.problemID, k.language, claimToken, remote.Status, remote.ID, remote.HTMLURL)
@@ -919,7 +1080,7 @@ func (d *DolosService) pollActiveReports(ctx context.Context, contestID string) 
 		return err
 	}
 
-	if _, err := d.db.ExecContext(ctx, `UPDATE contest_plagiarism_reports SET status='failed', error='Dolos report timed out after 30 minutes in queued/running state', updated_at=NOW() WHERE contest_id=$1 AND status IN ('queued','running','unknown') AND dolos_report_id IS NOT NULL AND created_at < NOW()-INTERVAL '30 minutes'`, contestID); err != nil {
+	if _, err := d.db.ExecContext(ctx, `UPDATE contest_plagiarism_reports SET status='failed', error='Dolos report timed out after 30 minutes in queued/running state', updated_at=NOW() WHERE contest_id=$1 AND status IN ('queued','running','unknown') AND dolos_report_id IS NOT NULL AND COALESCE(uploaded_at, created_at) < NOW()-INTERVAL '30 minutes'`, contestID); err != nil {
 		return err
 	}
 
@@ -1084,7 +1245,7 @@ func listSourcesTx(ctx context.Context, tx *sql.Tx, contestID string) ([]dolosSo
 		SELECT DISTINCT ON (user_id, problem_id)
 			id::text, user_id::text, problem_id::text, COALESCE(language, '')
 		FROM submissions
-		WHERE contest_id = $1 AND type = 'code' AND status <> 'judge_error'
+		WHERE contest_id = $1 AND type = 'code'
 		ORDER BY user_id, problem_id, created_at DESC, id DESC
 	`, contestID)
 	if err != nil {
@@ -1164,7 +1325,7 @@ func (d *DolosService) makeArchive(ctx context.Context, sources []dolosSource) (
 		ext := languageExtension(s.language)
 		// Use submission ID as the directory to avoid leaking user identifiers
 		// to the external Dolos provider. Users are resolved locally via submissions.id.
-		name := path.Join(s.id, s.problemID+"_"+s.id+ext)
+		name := path.Join(s.id, s.problemID+ext)
 
 		f, err := zw.Create(name)
 		if err != nil {
@@ -1176,7 +1337,7 @@ func (d *DolosService) makeArchive(ctx context.Context, sources []dolosSource) (
 			return nil, err
 		}
 
-		if buf.Len() > maxArchiveBytes {
+		if buf.Len() >= maxArchiveBytes {
 			zw.Close()
 			return nil, fmt.Errorf("archive size exceeds 10 MB limit while packaging")
 		}

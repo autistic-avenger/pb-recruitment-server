@@ -185,3 +185,111 @@ func TestLanguageExtension(t *testing.T) {
 		}
 	}
 }
+
+func TestDolosCSVWithSubmissionIDsAndThreshold(t *testing.T) {
+	// CSV containing pairs with submission IDs and one pair below the 0.20 similarity threshold
+	csvContent := "id,leftFilePath,rightFilePath,similarity,totalOverlap,longestFragment\n" +
+		"1,/tmp/dolos-unzip-xyz/sub-101/prob1.py,/tmp/dolos-unzip-xyz/sub-102/prob1.py,0.95,200,60\n" +
+		"2,/tmp/dolos-unzip-xyz/sub-103/prob1.py,/tmp/dolos-unzip-xyz/sub-104/prob1.py,0.15,10,5\n" +
+		"3,/tmp/dolos-unzip-xyz/sub-105/prob1.py,/tmp/dolos-unzip-xyz/sub-106/prob1.py,0.80,120,40\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/reports/rep-sub/data/pairs.csv" {
+			w.Header().Set("Content-Type", "text/csv")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(csvContent))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	svc := &DolosService{
+		baseURL: server.URL,
+		client:  server.Client(),
+	}
+
+	pairs, err := svc.fetchReportPairs(context.Background(), "rep-sub")
+	if err != nil {
+		t.Fatalf("fetchReportPairs failed: %v", err)
+	}
+
+	// Pair with 0.15 should be filtered out by threshold
+	if len(pairs) != 2 {
+		t.Fatalf("expected 2 pairs (0.15 filtered out), got %d", len(pairs))
+	}
+
+	// First pair should be highest similarity (0.95)
+	if pairs[0].LeftUserID != "sub-101" || pairs[0].RightUserID != "sub-102" {
+		t.Errorf("expected sub-101 and sub-102, got %q and %q", pairs[0].LeftUserID, pairs[0].RightUserID)
+	}
+	if pairs[0].LeftFile != "sub-101/prob1.py" || pairs[0].RightFile != "sub-102/prob1.py" {
+		t.Errorf("expected canonical files sub-101/prob1.py and sub-102/prob1.py, got %q and %q", pairs[0].LeftFile, pairs[0].RightFile)
+	}
+	if pairs[0].Similarity != 0.95 {
+		t.Errorf("expected similarity 0.95, got %f", pairs[0].Similarity)
+	}
+
+	// Second pair should be 0.80
+	if pairs[1].LeftUserID != "sub-105" || pairs[1].RightUserID != "sub-106" {
+		t.Errorf("expected sub-105 and sub-106, got %q and %q", pairs[1].LeftUserID, pairs[1].RightUserID)
+	}
+	if pairs[1].Similarity != 0.80 {
+		t.Errorf("expected similarity 0.80, got %f", pairs[1].Similarity)
+	}
+
+	// Test cache hit
+	cachedPairs, err := svc.fetchReportPairs(context.Background(), "rep-sub")
+	if err != nil || len(cachedPairs) != 2 {
+		t.Fatalf("expected cached pairs, got %v (len %d)", err, len(cachedPairs))
+	}
+
+	// Test membership check with early exit
+	validKey := pairKey("sub-101/prob1.py", "sub-102/prob1.py")
+	found, err := svc.fetchReportPairMembership(context.Background(), "rep-sub", validKey)
+	if err != nil || !found {
+		t.Errorf("expected membership true for %s, got %v (err: %v)", validKey, found, err)
+	}
+
+	missingKey := pairKey("sub-999/prob1.py", "sub-888/prob1.py")
+	found, err = svc.fetchReportPairMembership(context.Background(), "rep-sub", missingKey)
+	if err != nil || found {
+		t.Errorf("expected membership false for %s, got %v (err: %v)", missingKey, found, err)
+	}
+}
+
+func TestDolosMissingUserLookupClearsUserID(t *testing.T) {
+	allPairs := []dto.PlagiarismPair{
+		{
+			LeftUserID:  "sub-found",
+			RightUserID: "sub-missing",
+		},
+	}
+	subUsers := map[string]userSubInfo{
+		"sub-found": {userID: "usr-real", name: "Real User"},
+	}
+
+	for i := range allPairs {
+		if info, ok := subUsers[allPairs[i].LeftUserID]; ok {
+			allPairs[i].LeftUserID = info.userID
+			allPairs[i].LeftName = info.name
+		} else {
+			allPairs[i].LeftUserID = ""
+			allPairs[i].LeftName = ""
+		}
+		if info, ok := subUsers[allPairs[i].RightUserID]; ok {
+			allPairs[i].RightUserID = info.userID
+			allPairs[i].RightName = info.name
+		} else {
+			allPairs[i].RightUserID = ""
+			allPairs[i].RightName = ""
+		}
+	}
+
+	if allPairs[0].LeftUserID != "usr-real" || allPairs[0].LeftName != "Real User" {
+		t.Errorf("expected resolved left user usr-real, got %q", allPairs[0].LeftUserID)
+	}
+	if allPairs[0].RightUserID != "" || allPairs[0].RightName != "" {
+		t.Errorf("expected cleared right user ID on lookup miss, got %q", allPairs[0].RightUserID)
+	}
+}
