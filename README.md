@@ -260,19 +260,19 @@ the report URL, and the public Dolos service enforces a strict 10 MB archive lim
 
 Admin REST APIs:
 - `GET /admin/contest/{id}/plagiarism`: Retrieves overall status, public report URL (if ready), and individual per-problem/language report statuses.
-- `GET /admin/contest/{id}/plagiarism/pairs`: Retrieves matching submission pairs across finished problem reports with similarity metrics and human review decisions.
+- `GET /admin/contest/{id}/plagiarism/pairs`: Retrieves matching submission pairs across finished problem reports with similarity metrics and human review decisions. Returns a paginated shortlist of up to 1,000 candidate pairs per problem/language group with similarity >= 20% (0.20), sorted by similarity descending. Response headers include `X-Total-Count`, `X-Truncated` (`true` when any group exceeds 1,000 qualifying pairs), `X-Max-Pairs-Per-Report`, and `X-Min-Similarity`. For exhaustive review beyond the 1,000-pair shortlist, consult the complete per-group Dolos report URL from `GET /admin/contest/{id}/plagiarism`.
 - `PATCH /admin/contest/{id}/plagiarism/pairs/{pairKey}`: Records human review decisions (`cleared`, `confirmed`, `unreviewed`) with an optional note (up to 1000 characters) for a verified pair in the report evidence.
 
 Apply migration `000033` before deploying. Pair review PATCH requests must include the displayed `report_id`. Note that frontend UI integration for Dolos is not yet shipped; these endpoints are accessible via admin API clients.
 
 #### Rerunning Plagiarism Checks
 
-If an upload was interrupted or failed due to transient provider errors, reset the plagiarism state for that contest using:
+If an upload was interrupted, failed due to transient provider errors, or provider report data was purged:
 
 ```sql
 UPDATE contest_plagiarism_reports
 SET status = 'pending', attempts = 0, claim_token = NULL, error = NULL, next_retry_at = NOW(), uploaded_at = NULL, updated_at = NOW()
-WHERE contest_id = '<contest_id>' AND status IN ('failed', 'error');
+WHERE contest_id = '<contest_id>' AND status IN ('failed', 'error', 'purged', 'unavailable');
 ```
 
 ### Local connection to the EC2 judge

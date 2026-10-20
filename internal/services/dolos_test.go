@@ -1,9 +1,14 @@
 package services
 
 import (
+	"app/internal/s3"
+	"container/heap"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 
 	"app/internal/models/dto"
@@ -35,7 +40,7 @@ func TestDolosCSVHeaderAndPathParsing(t *testing.T) {
 		client:  server.Client(),
 	}
 
-	pairs, err := svc.fetchReportPairs(context.Background(), "rep-123")
+	pairs, _, err := svc.fetchReportPairs(context.Background(), "rep-123")
 	if err != nil {
 		t.Fatalf("fetchReportPairs failed: %v", err)
 	}
@@ -126,7 +131,7 @@ func TestDolosCanonicalPathExtraction(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		cPath, uID := extractCanonicalPathAndUser(tc.input)
+		cPath, uID := extractCanonicalPathAndSubID(tc.input)
 		if cPath != tc.expectedPath {
 			t.Errorf("input %q: expected canonical path %q, got %q", tc.input, tc.expectedPath, cPath)
 		}
@@ -209,9 +214,12 @@ func TestDolosCSVWithSubmissionIDsAndThreshold(t *testing.T) {
 		client:  server.Client(),
 	}
 
-	pairs, err := svc.fetchReportPairs(context.Background(), "rep-sub")
+	pairs, truncated, err := svc.fetchReportPairs(context.Background(), "rep-sub")
 	if err != nil {
 		t.Fatalf("fetchReportPairs failed: %v", err)
+	}
+	if truncated {
+		t.Errorf("expected truncated to be false for small dataset, got true")
 	}
 
 	// Pair with 0.15 should be filtered out by threshold
@@ -239,7 +247,7 @@ func TestDolosCSVWithSubmissionIDsAndThreshold(t *testing.T) {
 	}
 
 	// Test cache hit
-	cachedPairs, err := svc.fetchReportPairs(context.Background(), "rep-sub")
+	cachedPairs, _, err := svc.fetchReportPairs(context.Background(), "rep-sub")
 	if err != nil || len(cachedPairs) != 2 {
 		t.Fatalf("expected cached pairs, got %v (len %d)", err, len(cachedPairs))
 	}
@@ -258,38 +266,86 @@ func TestDolosCSVWithSubmissionIDsAndThreshold(t *testing.T) {
 	}
 }
 
-func TestDolosMissingUserLookupClearsUserID(t *testing.T) {
-	allPairs := []dto.PlagiarismPair{
-		{
-			LeftUserID:  "sub-found",
-			RightUserID: "sub-missing",
-		},
-	}
-	subUsers := map[string]userSubInfo{
-		"sub-found": {userID: "usr-real", name: "Real User"},
+func TestDolosReportTruncationDetection(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString("id,leftFilePath,rightFilePath,similarity,totalOverlap,longestFragment\n")
+	for i := 1; i <= 1050; i++ {
+		sb.WriteString(fmt.Sprintf("%d,/tmp/sub-%04d/p.py,/tmp/sub-%04d/p.py,0.90,100,50\n", i, i, i+1))
 	}
 
-	for i := range allPairs {
-		if info, ok := subUsers[allPairs[i].LeftUserID]; ok {
-			allPairs[i].LeftUserID = info.userID
-			allPairs[i].LeftName = info.name
-		} else {
-			allPairs[i].LeftUserID = ""
-			allPairs[i].LeftName = ""
-		}
-		if info, ok := subUsers[allPairs[i].RightUserID]; ok {
-			allPairs[i].RightUserID = info.userID
-			allPairs[i].RightName = info.name
-		} else {
-			allPairs[i].RightUserID = ""
-			allPairs[i].RightName = ""
-		}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/csv")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(sb.String()))
+	}))
+	defer server.Close()
+
+	svc := &DolosService{
+		baseURL: server.URL,
+		client:  server.Client(),
 	}
 
-	if allPairs[0].LeftUserID != "usr-real" || allPairs[0].LeftName != "Real User" {
-		t.Errorf("expected resolved left user usr-real, got %q", allPairs[0].LeftUserID)
+	pairs, truncated, err := svc.fetchReportPairs(context.Background(), "rep-trunc")
+	if err != nil {
+		t.Fatalf("fetchReportPairs failed: %v", err)
 	}
-	if allPairs[0].RightUserID != "" || allPairs[0].RightName != "" {
-		t.Errorf("expected cleared right user ID on lookup miss, got %q", allPairs[0].RightUserID)
+	if !truncated {
+		t.Errorf("expected truncated to be true for 1050 pairs, got false")
+	}
+	if len(pairs) != MaxPairsPerReport {
+		t.Fatalf("expected capped at %d pairs, got %d", MaxPairsPerReport, len(pairs))
+	}
+}
+
+func TestMakeArchiveFailsOnMissingSource(t *testing.T) {
+	store := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer store.Close()
+
+	for key, value := range map[string]string{
+		"AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test", "AWS_SESSION_TOKEN": "",
+		"AWS_REGION": "us-east-1", "AWS_EC2_METADATA_DISABLED": "true",
+		"AWS_CONFIG_FILE": os.DevNull, "AWS_SHARED_CREDENTIALS_FILE": os.DevNull,
+		"AWS_ENDPOINT_URL_S3": store.URL, "S3_SUBMISSIONS_BUCKET": "test",
+	} {
+		t.Setenv(key, value)
+	}
+
+	svc := &DolosService{
+		s3: s3.NewS3Client(),
+	}
+
+	sources := []dolosSource{
+		{id: "sub-1", userID: "usr-1", problemID: "prob1", language: "python"},
+	}
+
+	_, err := svc.makeArchive(context.Background(), sources)
+	if err == nil {
+		t.Fatal("expected makeArchive to fail when source object is missing, but got nil error")
+	}
+	if !strings.Contains(err.Error(), "read source sub-1") {
+		t.Fatalf("expected error to mention reading source, got %v", err)
+	}
+}
+
+func TestPairMinHeapDeterministicTieBreaking(t *testing.T) {
+	h := &pairMinHeap{}
+	heap.Init(h)
+
+	p1 := dto.PlagiarismPair{Key: "key-b", Similarity: 0.50}
+	p2 := dto.PlagiarismPair{Key: "key-a", Similarity: 0.50}
+
+	heap.Push(h, p1)
+	heap.Push(h, p2)
+
+	// Since similarity is tied, key-a is less than key-b, so key-a must be at root
+	minElem := heap.Pop(h).(dto.PlagiarismPair)
+	if minElem.Key != "key-a" {
+		t.Errorf("expected min tie-break key-a, got %s", minElem.Key)
+	}
+	maxElem := heap.Pop(h).(dto.PlagiarismPair)
+	if maxElem.Key != "key-b" {
+		t.Errorf("expected remaining key-b, got %s", maxElem.Key)
 	}
 }

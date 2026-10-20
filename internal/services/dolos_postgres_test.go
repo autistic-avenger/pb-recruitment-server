@@ -1,10 +1,12 @@
 package services
 
 import (
+	"app/internal/common"
 	"app/internal/s3"
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -132,10 +134,15 @@ func TestDolosStaleSingletonCannotOverwriteNewUploadPostgres(t *testing.T) {
 	cfg.Tracer = barrier
 	oldDB := stdlib.OpenDB(*cfg)
 	t.Cleanup(func() { oldDB.Close() })
-	old := *d
-	old.db = oldDB
+	old := &DolosService{
+		db:         oldDB,
+		s3:         d.s3,
+		client:     d.client,
+		baseURL:    d.baseURL,
+		pairsCache: make(map[string]cachedReportPairs),
+	}
 	oldDone := make(chan error, 1)
-	go func() { oldDone <- old.processContest(ctx, "contest", "Test", 1) }()
+	go func() { oldDone <- old.processContest(ctx, "contest", 1) }()
 	select {
 	case <-barrier.committed:
 	case <-ctx.Done():
@@ -150,7 +157,7 @@ func TestDolosStaleSingletonCannotOverwriteNewUploadPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	newDone := make(chan error, 1)
-	go func() { newDone <- d.processContest(ctx, "contest", "Test", 2) }()
+	go func() { newDone <- d.processContest(ctx, "contest", 2) }()
 	select {
 	case <-accepted:
 	case <-ctx.Done():
@@ -174,5 +181,130 @@ func TestDolosStaleSingletonCannotOverwriteNewUploadPostgres(t *testing.T) {
 	report, err := d.GetReport(ctx, "contest")
 	if err != nil || report.Status != "finished" {
 		t.Fatalf("report=%+v: %v", report, err)
+	}
+}
+
+func TestDolosMissingUserLookupClearsUserIDPostgres(t *testing.T) {
+	db, _ := dolosPostgresDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO contests(id, name, registration_start_time, registration_end_time, start_time, end_time)
+		VALUES('contest-user', 'Test Contest', 0, 0, 0, 100);
+		INSERT INTO problems(id, contest_id, name, score, type)
+		VALUES('problem1', 'contest-user', 'Problem 1', 10, 'code');
+		INSERT INTO users(id, name, email, role)
+		VALUES('usr-real', 'Real User', 'real@example.com', 'participant');
+		INSERT INTO submissions(id, user_id, contest_id, problem_id, type, language, status, created_at)
+		VALUES('sub-found', 'usr-real', 'contest-user', 'problem1', 'code', 'python', 'accepted', 10);
+		INSERT INTO submissions(id, user_id, contest_id, problem_id, type, language, status, created_at)
+		VALUES('sub-missing', 'usr-ghost', 'contest-user', 'problem1', 'code', 'python', 'accepted', 20);
+		INSERT INTO contest_plagiarism_runs(contest_id, analyzed_end_time, source_count, latest_submission_at, source_signature)
+		VALUES('contest-user', 100, 2, 20, 'sig123');
+		INSERT INTO contest_plagiarism_reports(contest_id, problem_id, language, status, dolos_report_id, report_url)
+		VALUES('contest-user', 'problem1', 'python', 'finished', 'rep-users', 'https://dolos.example.com/rep-users');
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	csvData := `id,leftfileid,rightfileid,similarity,totaloverlap,longestfragment,leftfilepath,rightfilepath
+1,1,2,0.85,100,50,sub-found/problem1.py,sub-missing/problem1.py
+`
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/reports/rep-users/data/pairs.csv" {
+			w.Header().Set("Content-Type", "text/csv")
+			w.Write([]byte(csvData))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(provider.Close)
+
+	svc := &DolosService{
+		db:         db,
+		client:     provider.Client(),
+		baseURL:    provider.URL,
+		pairsCache: make(map[string]cachedReportPairs),
+	}
+
+	pairs, err := svc.GetPairs(ctx, "contest-user", 0)
+	if err != nil {
+		t.Fatalf("GetPairs failed: %v", err)
+	}
+	if len(pairs) != 1 {
+		t.Fatalf("expected 1 pair, got %d", len(pairs))
+	}
+	p := pairs[0]
+	if p.LeftUserID != "usr-real" || p.LeftName != "Real User" {
+		t.Errorf("expected left user 'usr-real' ('Real User'), got ID=%q Name=%q", p.LeftUserID, p.LeftName)
+	}
+	if p.RightUserID != "" || p.RightName != "" {
+		t.Errorf("expected right user to be cleared, got ID=%q Name=%q", p.RightUserID, p.RightName)
+	}
+
+	// Test pagination bounds and large integer overflow protection (Finding 5)
+	overflowPage := 9223372036854775807
+	pagedPairs, err := svc.GetPairs(ctx, "contest-user", overflowPage)
+	if err != nil {
+		t.Fatalf("GetPairs with large page integer failed: %v", err)
+	}
+	if len(pagedPairs) != 0 {
+		t.Errorf("expected empty pairs for page %d, got %d", overflowPage, len(pagedPairs))
+	}
+}
+
+func TestDolosProviderPurgedReportMarksFailedPostgres(t *testing.T) {
+	db, _ := dolosPostgresDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO contests(id, name, registration_start_time, registration_end_time, start_time, end_time)
+		VALUES('contest-purged', 'Purged Contest', 0, 0, 0, 100);
+		INSERT INTO problems(id, contest_id, name, score, type)
+		VALUES('problem1', 'contest-purged', 'Problem 1', 10, 'code');
+		INSERT INTO contest_plagiarism_runs(contest_id, analyzed_end_time, source_count, latest_submission_at, source_signature)
+		VALUES('contest-purged', 100, 0, 0, 'sig123');
+		INSERT INTO contest_plagiarism_reports(contest_id, problem_id, language, status, dolos_report_id, report_url)
+		VALUES('contest-purged', 'problem1', 'python', 'finished', 'rep-deleted', 'https://dolos.example.com/rep-deleted');
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(provider.Close)
+
+	svc := &DolosService{
+		db:         db,
+		client:     provider.Client(),
+		baseURL:    provider.URL,
+		pairsCache: make(map[string]cachedReportPairs),
+	}
+
+	_, err := svc.GetPairs(ctx, "contest-purged", 0)
+	if !errors.Is(err, common.ErrReportNotFound) {
+		t.Fatalf("expected ErrReportNotFound, got %v", err)
+	}
+
+	var status, errMsg string
+	if err := db.QueryRowContext(ctx, `SELECT status, COALESCE(error, '') FROM contest_plagiarism_reports WHERE contest_id='contest-purged' AND problem_id='problem1'`).Scan(&status, &errMsg); err != nil {
+		t.Fatal(err)
+	}
+	if status != "purged" {
+		t.Fatalf("expected status 'purged', got %q", status)
+	}
+	if !strings.Contains(errMsg, "purged") {
+		t.Fatalf("expected error message to mention purged, got %q", errMsg)
+	}
+
+	rep, err := svc.GetReport(ctx, "contest-purged")
+	if err != nil {
+		t.Fatalf("GetReport failed: %v", err)
+	}
+	if rep.Status != "failed" {
+		t.Fatalf("expected overall status 'failed' after report was purged, got %q", rep.Status)
 	}
 }

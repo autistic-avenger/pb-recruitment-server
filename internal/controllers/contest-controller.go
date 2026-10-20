@@ -55,12 +55,16 @@ func (cc *ContestController) GetDolosReport(ctx echo.Context) error {
 
 // GetDolosPairs godoc
 // @Summary      Get plagiarism candidate pairs (Admin)
-// @Description  Get matching contestant submission pairs detected by Dolos with similarity scores and review statuses
+// @Description  Get matching contestant submission pairs detected by Dolos with similarity scores and review statuses. Returns up to the top 1,000 candidate pairs per problem/language group with similarity >= 20% (0.20), sorted by similarity descending. Sets response headers X-Total-Count, X-Truncated, X-Max-Pairs-Per-Report, and X-Min-Similarity. For complete un-truncated pair evidence beyond 1,000 pairs, inspect the per-group report URL via GET /admin/contest/{id}/plagiarism.
 // @Tags         Admin - Contests
 // @Produce      json
 // @Security     BearerAuth
 // @Param        id path string true "Contest ID"
 // @Param        page query int false "Zero-based page number; 100 pairs per page"
+// @Header       200 {integer} X-Total-Count "Total candidate pairs available in the local shortlist across finished reports"
+// @Header       200 {boolean} X-Truncated "True if candidate pairs in any underlying report exceeded the 1,000 pair cap"
+// @Header       200 {integer} X-Max-Pairs-Per-Report "Maximum candidate pairs retained per report (1000)"
+// @Header       200 {string} X-Min-Similarity "Minimum similarity score threshold (0.20)"
 // @Success      200 {array} dto.PlagiarismPair
 // @Failure      401 {object} map[string]string "Unauthorized"
 // @Failure      403 {object} map[string]string "Forbidden - Admin access required"
@@ -77,7 +81,7 @@ func (cc *ContestController) GetDolosPairs(ctx echo.Context) error {
 		}
 		page = parsed
 	}
-	pairs, err := cc.dolosService.GetPairs(ctx.Request().Context(), ctx.Param("id"), page)
+	pairs, totalCount, truncated, err := cc.dolosService.GetPairsWithMeta(ctx.Request().Context(), ctx.Param("id"), page)
 	if err != nil {
 		if errors.Is(err, common.ContestNotFoundError) {
 			return ctx.JSON(http.StatusNotFound, map[string]string{"error": "contest not found"})
@@ -91,6 +95,10 @@ func (cc *ContestController) GetDolosPairs(ctx echo.Context) error {
 		log.Errorf("get Dolos pairs for contest %s: %v", ctx.Param("id"), err)
 		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to retrieve plagiarism pairs"})
 	}
+	ctx.Response().Header().Set("X-Total-Count", strconv.Itoa(totalCount))
+	ctx.Response().Header().Set("X-Truncated", strconv.FormatBool(truncated))
+	ctx.Response().Header().Set("X-Max-Pairs-Per-Report", strconv.Itoa(services.MaxPairsPerReport))
+	ctx.Response().Header().Set("X-Min-Similarity", "0.20")
 	return ctx.JSON(http.StatusOK, pairs)
 }
 
