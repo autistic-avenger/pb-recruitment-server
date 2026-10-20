@@ -194,8 +194,8 @@ func TestDolosMissingUserLookupClearsUserIDPostgres(t *testing.T) {
 		VALUES('contest-user', 'Test Contest', 0, 0, 0, 100);
 		INSERT INTO problems(id, contest_id, name, score, type)
 		VALUES('problem1', 'contest-user', 'Problem 1', 10, 'code');
-		INSERT INTO users(id, name, email, role)
-		VALUES('usr-real', 'Real User', 'real@example.com', 'participant');
+		INSERT INTO users(id, name, email, usn, current_year, department)
+		VALUES('usr-real', 'Real User', 'real@example.com', 'USN001', 2024, 'CS');
 		INSERT INTO submissions(id, user_id, contest_id, problem_id, type, language, status, created_at)
 		VALUES('sub-found', 'usr-real', 'contest-user', 'problem1', 'code', 'python', 'accepted', 10);
 		INSERT INTO submissions(id, user_id, contest_id, problem_id, type, language, status, created_at)
