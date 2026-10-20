@@ -6,6 +6,7 @@ import (
 	"app/internal/models/dto"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/lib/pq"
 )
 
@@ -96,32 +98,45 @@ func (s *RankingStore) UpdateLeaderboardUser(ctx context.Context, contestID stri
 		return fmt.Errorf("ranking store: db is not initialized")
 	}
 
-	query := "UPDATE rankings SET "
-	args := []interface{}{}
-	argID := 1
-
-	if req.Hidden != nil {
-		query += fmt.Sprintf("hidden = $%d, ", argID)
-		args = append(args, *req.Hidden)
-		argID++
-	}
-	if req.Disqualified != nil {
-		query += fmt.Sprintf("disqualified = $%d, ", argID)
-		args = append(args, *req.Disqualified)
-		argID++
-	}
-
-	if len(args) == 0 {
+	if req.Hidden == nil && req.Disqualified == nil {
 		return fmt.Errorf("no fields to update")
 	}
 
-	query = strings.TrimSuffix(query, ", ")
-
-	query += fmt.Sprintf(" WHERE contest_id = $%d AND user_id = $%d", argID, argID+1)
-	args = append(args, contestID, userID)
-
-	_, err := s.db.ExecContext(ctx, query, args...)
+	// Verify participant existence in this contest (either existing ranking or contest registration)
+	var exists bool
+	checkQuery := `
+		SELECT EXISTS (
+			SELECT 1 FROM rankings WHERE contest_id = $1 AND user_id = $2
+			UNION
+			SELECT 1 FROM contest_registrations cr
+			JOIN users u ON cr.user_id = u.id
+			WHERE cr.contest_id = $1 AND cr.user_id = $2
+		)
+	`
+	err := s.db.QueryRowContext(ctx, checkQuery, contestID, userID).Scan(&exists)
 	if err != nil {
+		log.Printf("ranking-store: check participant failed: %v", err)
+		return fmt.Errorf("check participant: %w", err)
+	}
+	if !exists {
+		return common.UserNotRegisteredError
+	}
+
+	query := `
+		INSERT INTO rankings (contest_id, user_id, score, rank, hidden, disqualified, shortlisted)
+		VALUES ($1, $2, 0, 0, COALESCE($3, false), COALESCE($4, false), false)
+		ON CONFLICT (contest_id, user_id)
+		DO UPDATE SET
+			hidden = COALESCE($3, rankings.hidden),
+			disqualified = COALESCE($4, rankings.disqualified)
+	`
+
+	_, err = s.db.ExecContext(ctx, query, contestID, userID, req.Hidden, req.Disqualified)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" && pgErr.ConstraintName == "rankings_contest_id_fkey" {
+			return common.ErrNotFound
+		}
 		log.Printf("ranking-store: update failed: %v", err)
 		return fmt.Errorf("update ranking: %w", err)
 	}
