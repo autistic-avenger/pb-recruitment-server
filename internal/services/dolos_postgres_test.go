@@ -2,7 +2,9 @@ package services
 
 import (
 	"app/internal/common"
+	"app/internal/models/dto"
 	"app/internal/s3"
+	"app/internal/stores"
 	"context"
 	"database/sql"
 	"encoding/base64"
@@ -86,101 +88,121 @@ func (b *dolosCommitBarrier) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, dat
 	}
 }
 
-func TestDolosStaleSingletonCannotOverwriteNewUploadPostgres(t *testing.T) {
-	db, cfg := dolosPostgresDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO contests(id,name,registration_start_time,registration_end_time,start_time,end_time)
-		VALUES('contest','Test',0,0,0,1);
-		INSERT INTO problems(id,contest_id,name,score,type) VALUES('problem','contest','Test',10,'code');
-		INSERT INTO submissions(id,user_id,contest_id,problem_id,type,language,status,created_at)
-		VALUES('source-a','alice','contest','problem','code','python','accepted',1);
-	`); err != nil {
-		t.Fatal(err)
-	}
-	store := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, base64.StdEncoding.EncodeToString([]byte("print('synthetic')")))
-	}))
-	t.Cleanup(store.Close)
-	for key, value := range map[string]string{
-		"AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test", "AWS_SESSION_TOKEN": "",
-		"AWS_REGION": "us-east-1", "AWS_EC2_METADATA_DISABLED": "true",
-		"AWS_CONFIG_FILE": os.DevNull, "AWS_SHARED_CREDENTIALS_FILE": os.DevNull,
-		"AWS_ENDPOINT_URL_S3": store.URL, "S3_SUBMISSIONS_BUCKET": "test",
+func TestDolosStaleWorkersCannotClaimNewGenerationPostgres(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		oldPair  bool
+		language string
+	}{
+		{name: "singleton", language: "python"},
+		{name: "same language", oldPair: true, language: "python"},
+		{name: "removed language", oldPair: true, language: "cpp"},
 	} {
-		t.Setenv(key, value)
-	}
-	accepted, releaseUpload := make(chan struct{}), make(chan struct{})
-	var posts atomic.Int32
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.NotFound(w, r)
-			return
-		}
-		if posts.Add(1) == 1 {
-			close(accepted)
-		}
-		select {
-		case <-releaseUpload:
-		case <-ctx.Done():
-			return
-		}
-		fmt.Fprint(w, `{"id":"new-report","status":"finished"}`)
-	}))
-	t.Cleanup(provider.Close)
-	d := &DolosService{db: db, s3: s3.NewS3Client(), client: provider.Client(), baseURL: provider.URL}
-	barrier := &dolosCommitBarrier{committed: make(chan struct{}), release: make(chan struct{})}
-	cfg.Tracer = barrier
-	oldDB := stdlib.OpenDB(*cfg)
-	t.Cleanup(func() { oldDB.Close() })
-	old := &DolosService{
-		db:         oldDB,
-		s3:         d.s3,
-		client:     d.client,
-		baseURL:    d.baseURL,
-		pairsCache: make(map[string]cachedReportPairs),
-	}
-	oldDone := make(chan error, 1)
-	go func() { oldDone <- old.processContest(ctx, "contest", 1) }()
-	select {
-	case <-barrier.committed:
-	case <-ctx.Done():
-		t.Fatal("old worker did not initialize its generation")
-	}
-
-	if _, err := db.ExecContext(ctx, `
-		UPDATE contests SET end_time=2 WHERE id='contest';
-		INSERT INTO submissions(id,user_id,contest_id,problem_id,type,language,status,created_at)
-		VALUES('source-b','bob','contest','problem','code','python','accepted',2);
-	`); err != nil {
-		t.Fatal(err)
-	}
-	newDone := make(chan error, 1)
-	go func() { newDone <- d.processContest(ctx, "contest", 2) }()
-	select {
-	case <-accepted:
-	case <-ctx.Done():
-		t.Fatal("new worker did not upload its generation")
-	}
-	close(barrier.release)
-	if err := <-oldDone; err != nil {
-		t.Fatal(err)
-	}
-	close(releaseUpload)
-	if err := <-newDone; err != nil {
-		t.Fatal(err)
-	}
-	var status, reportID string
-	if err := db.QueryRowContext(ctx, `SELECT status,COALESCE(dolos_report_id,'') FROM contest_plagiarism_reports WHERE contest_id='contest'`).Scan(&status, &reportID); err != nil {
-		t.Fatal(err)
-	}
-	if status != "finished" || reportID != "new-report" || posts.Load() != 1 {
-		t.Fatalf("status=%s report=%q uploads=%d", status, reportID, posts.Load())
-	}
-	report, err := d.GetReport(ctx, "contest")
-	if err != nil || report.Status != "finished" {
-		t.Fatalf("report=%+v: %v", report, err)
+		t.Run(tc.name, func(t *testing.T) {
+			db, cfg := dolosPostgresDB(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if _, err := db.ExecContext(ctx, `
+    INSERT INTO contests(id,name,registration_start_time,registration_end_time,start_time,end_time)
+    VALUES('contest','Test',0,0,0,1);
+    INSERT INTO problems(id,contest_id,name,score,type) VALUES('problem','contest','Test',10,'code');
+    INSERT INTO submissions(id,user_id,contest_id,problem_id,type,language,status,created_at)
+    VALUES('old-a','alice','contest','problem','code','python','accepted',1);
+   `); err != nil {
+				t.Fatal(err)
+			}
+			if tc.oldPair {
+				if _, err := db.ExecContext(ctx, `INSERT INTO submissions(id,user_id,contest_id,problem_id,type,language,status,created_at)
+     VALUES('old-b','bob','contest','problem','code','python','accepted',2)`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			store := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprint(w, base64.StdEncoding.EncodeToString([]byte("synthetic source")))
+			}))
+			t.Cleanup(store.Close)
+			for key, value := range map[string]string{
+				"AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test", "AWS_SESSION_TOKEN": "",
+				"AWS_REGION": "us-east-1", "AWS_EC2_METADATA_DISABLED": "true",
+				"AWS_CONFIG_FILE": os.DevNull, "AWS_SHARED_CREDENTIALS_FILE": os.DevNull,
+				"AWS_ENDPOINT_URL_S3": store.URL, "S3_SUBMISSIONS_BUCKET": "test",
+			} {
+				t.Setenv(key, value)
+			}
+			var posts atomic.Int32
+			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					posts.Add(1)
+					fmt.Fprint(w, `{"id":"new-report","status":"finished"}`)
+					return
+				}
+				ext := languageExtension(tc.language)
+				fmt.Fprintf(w, "id,leftFilePath,rightFilePath,similarity,totalOverlap,longestFragment\n1,new-a/problem%s,new-b/problem%s,0.9,100,50\n", ext, ext)
+			}))
+			t.Cleanup(provider.Close)
+			service := &DolosService{db: db, s3: s3.NewS3Client(), client: provider.Client(), baseURL: provider.URL}
+			oldBarrier := &dolosCommitBarrier{committed: make(chan struct{}), release: make(chan struct{})}
+			oldCfg := cfg.Copy()
+			oldCfg.Tracer = oldBarrier
+			oldDB := stdlib.OpenDB(*oldCfg)
+			t.Cleanup(func() { oldDB.Close() })
+			old := &DolosService{db: oldDB, s3: service.s3, client: service.client, baseURL: service.baseURL}
+			oldDone := make(chan error, 1)
+			go func() { oldDone <- old.processContest(ctx, "contest", 1) }()
+			select {
+			case <-oldBarrier.committed:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			if _, err := db.ExecContext(ctx, `UPDATE contests SET end_time=2 WHERE id='contest';`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.ExecContext(ctx, `INSERT INTO submissions(id,user_id,contest_id,problem_id,type,language,status,created_at)
+    VALUES('new-a','alice','contest','problem','code',$1,'accepted',3),
+          ('new-b','bob','contest','problem','code',$1,'accepted',4)`, tc.language); err != nil {
+				t.Fatal(err)
+			}
+			currentBarrier := &dolosCommitBarrier{committed: make(chan struct{}), release: make(chan struct{})}
+			currentCfg := cfg.Copy()
+			currentCfg.Tracer = currentBarrier
+			currentDB := stdlib.OpenDB(*currentCfg)
+			t.Cleanup(func() { currentDB.Close() })
+			current := &DolosService{db: currentDB, s3: service.s3, client: service.client, baseURL: service.baseURL}
+			currentDone := make(chan error, 1)
+			go func() { currentDone <- current.processContest(ctx, "contest", 2) }()
+			select {
+			case <-currentBarrier.committed:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			close(oldBarrier.release)
+			if err := <-oldDone; err != nil {
+				t.Fatal(err)
+			}
+			var count, attempts int
+			var status string
+			if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM contest_plagiarism_reports WHERE contest_id='contest'`).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRowContext(ctx, `SELECT status,attempts FROM contest_plagiarism_reports WHERE contest_id='contest' AND language=$1`, tc.language).Scan(&status, &attempts); err != nil {
+				t.Fatal(err)
+			}
+			if count != 1 || status != "pending" || attempts != 0 || posts.Load() != 0 {
+				t.Fatalf("stale worker changed current generation: rows=%d status=%s attempts=%d uploads=%d", count, status, attempts, posts.Load())
+			}
+			close(currentBarrier.release)
+			if err := <-currentDone; err != nil {
+				t.Fatal(err)
+			}
+			report, err := service.GetReport(ctx, "contest")
+			if err != nil || report.Status != "finished" || posts.Load() != 1 {
+				t.Fatalf("report=%+v err=%v uploads=%d", report, err, posts.Load())
+			}
+			pairs, total, truncated, err := service.GetPairsWithMeta(ctx, "contest", 0)
+			if err != nil || len(pairs) != 1 || total != 1 || truncated {
+				t.Fatalf("pairs=%v total=%d truncated=%v err=%v", pairs, total, truncated, err)
+			}
+		})
 	}
 }
 
@@ -228,12 +250,12 @@ func TestDolosMissingUserLookupClearsUserIDPostgres(t *testing.T) {
 		pairsCache: make(map[string]cachedReportPairs),
 	}
 
-	pairs, err := svc.GetPairs(ctx, "contest-user", 0)
+	pairs, total, truncated, err := svc.GetPairsWithMeta(ctx, "contest-user", 0)
 	if err != nil {
 		t.Fatalf("GetPairs failed: %v", err)
 	}
-	if len(pairs) != 1 {
-		t.Fatalf("expected 1 pair, got %d", len(pairs))
+	if len(pairs) != 1 || total != 1 || truncated {
+		t.Fatalf("expected 1 pair without truncation, got pairs=%d total=%d truncated=%v", len(pairs), total, truncated)
 	}
 	p := pairs[0]
 	if p.LeftUserID != "usr-real" || p.LeftName != "Real User" {
@@ -245,12 +267,12 @@ func TestDolosMissingUserLookupClearsUserIDPostgres(t *testing.T) {
 
 	// Test pagination bounds and large integer overflow protection (Finding 5)
 	overflowPage := 9223372036854775807
-	pagedPairs, err := svc.GetPairs(ctx, "contest-user", overflowPage)
+	pagedPairs, pagedTotal, pagedTruncated, err := svc.GetPairsWithMeta(ctx, "contest-user", overflowPage)
 	if err != nil {
 		t.Fatalf("GetPairs with large page integer failed: %v", err)
 	}
-	if len(pagedPairs) != 0 {
-		t.Errorf("expected empty pairs for page %d, got %d", overflowPage, len(pagedPairs))
+	if len(pagedPairs) != 0 || pagedTotal != 1 || pagedTruncated {
+		t.Errorf("unexpected page %d: pairs=%d total=%d truncated=%v", overflowPage, len(pagedPairs), pagedTotal, pagedTruncated)
 	}
 }
 
@@ -284,7 +306,7 @@ func TestDolosProviderPurgedReportMarksFailedPostgres(t *testing.T) {
 		pairsCache: make(map[string]cachedReportPairs),
 	}
 
-	_, err := svc.GetPairs(ctx, "contest-purged", 0)
+	_, _, _, err := svc.GetPairsWithMeta(ctx, "contest-purged", 0)
 	if !errors.Is(err, common.ErrReportNotFound) {
 		t.Fatalf("expected ErrReportNotFound, got %v", err)
 	}
@@ -306,5 +328,95 @@ func TestDolosProviderPurgedReportMarksFailedPostgres(t *testing.T) {
 	}
 	if rep.Status != "failed" {
 		t.Fatalf("expected overall status 'failed' after report was purged, got %q", rep.Status)
+	}
+}
+
+// Pause after the report lock so deletion competes with the review's foreign-key check.
+type dolosReviewBarrier struct {
+	locked, release chan struct{}
+	once            sync.Once
+}
+type dolosReviewQueryKey struct{}
+
+func (b *dolosReviewBarrier) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	return context.WithValue(ctx, dolosReviewQueryKey{}, data.SQL)
+}
+func (b *dolosReviewBarrier) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	query, _ := ctx.Value(dolosReviewQueryKey{}).(string)
+	if data.Err == nil && strings.Contains(query, "FOR UPDATE OF p") {
+		b.once.Do(func() {
+			close(b.locked)
+			select {
+			case <-b.release:
+			case <-ctx.Done():
+			}
+		})
+	}
+}
+
+func TestDolosReviewAndContestDeletionPostgres(t *testing.T) {
+	db, cfg := dolosPostgresDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := db.ExecContext(ctx, `
+  INSERT INTO contests(id,name,registration_start_time,registration_end_time,start_time,end_time)
+  VALUES('contest','Test',0,0,0,1);
+  INSERT INTO problems(id,contest_id,name,score,type) VALUES('problem','contest','Test',10,'code');
+  INSERT INTO submissions(id,user_id,contest_id,problem_id,type,language,status,created_at)
+  VALUES('source-a','alice','contest','problem','code','python','accepted',1),
+        ('source-b','bob','contest','problem','code','python','accepted',1);
+  INSERT INTO contest_plagiarism_runs(contest_id,analyzed_end_time,source_count,latest_submission_at,source_signature)
+  VALUES('contest',1,2,1,'signature');
+  INSERT INTO contest_plagiarism_reports(contest_id,problem_id,language,status,dolos_report_id)
+  VALUES('contest','problem','python','finished','report');
+ `); err != nil {
+		t.Fatal(err)
+	}
+	barrier := &dolosReviewBarrier{locked: make(chan struct{}), release: make(chan struct{})}
+	reviewCfg := cfg.Copy()
+	reviewCfg.Tracer = barrier
+	reviewDB := stdlib.OpenDB(*reviewCfg)
+	t.Cleanup(func() { reviewDB.Close() })
+	review := NewDolosService(reviewDB, nil)
+	key := pairKey("source-a/problem.py", "source-b/problem.py")
+	review.setCachedPairs("report", []dto.PlagiarismPair{{Key: key}}, false)
+	deleteCfg := cfg.Copy()
+	deleteCfg.RuntimeParams["application_name"] = "dolos_delete_" + cfg.RuntimeParams["search_path"]
+	deleteDB := stdlib.OpenDB(*deleteCfg)
+	t.Cleanup(func() { deleteDB.Close() })
+	reviewDone, deleteDone := make(chan error, 1), make(chan error, 1)
+	go func() { reviewDone <- review.ReviewPair(ctx, "contest", key, "report", "confirmed", "review") }()
+	select {
+	case <-barrier.locked:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	go func() { deleteDone <- stores.NewContestStore(deleteDB).DeleteContest(ctx, "contest") }()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var blocked bool
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock')`, deleteCfg.RuntimeParams["application_name"]).Scan(&blocked); err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			break
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+	close(barrier.release)
+	if err := <-reviewDone; err != nil {
+		t.Fatalf("review failed: %v", err)
+	}
+	if err := <-deleteDone; err != nil {
+		t.Fatalf("deletion failed: %v", err)
+	}
+	var remaining int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM contests WHERE id='contest'`).Scan(&remaining); err != nil || remaining != 0 {
+		t.Fatalf("contest not deleted: count=%d err=%v", remaining, err)
 	}
 }

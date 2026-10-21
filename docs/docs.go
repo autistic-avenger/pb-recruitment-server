@@ -3545,9 +3545,6 @@ const docTemplate = `{
                 "error": {
                     "type": "string"
                 },
-                "report_url": {
-                    "type": "string"
-                },
                 "reports": {
                     "type": "array",
                     "items": {

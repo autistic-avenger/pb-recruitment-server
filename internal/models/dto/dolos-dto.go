@@ -31,8 +31,7 @@ type ProblemReportSummary struct {
 }
 
 type DolosContestReportResponse struct {
-	Status    string                 `json:"status"`
-	ReportURL string                 `json:"report_url,omitempty"`
-	Error     string                 `json:"error,omitempty"`
-	Reports   []ProblemReportSummary `json:"reports,omitempty"`
+	Status  string                 `json:"status"`
+	Error   string                 `json:"error,omitempty"`
+	Reports []ProblemReportSummary `json:"reports,omitempty"`
 }

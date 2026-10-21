@@ -89,9 +89,6 @@ func NewDolosService(db *sql.DB, objectStore *s3.S3) *DolosService {
 func (d *DolosService) getCachedPairs(reportID string) (cachedReportPairs, bool) {
 	d.pairsCacheMu.RLock()
 	defer d.pairsCacheMu.RUnlock()
-	if d.pairsCache == nil {
-		return cachedReportPairs{}, false
-	}
 	cached, ok := d.pairsCache[reportID]
 	if !ok {
 		return cachedReportPairs{}, false
@@ -121,9 +118,7 @@ func (d *DolosService) setCachedPairs(reportID string, pairs []dto.PlagiarismPai
 func (d *DolosService) deleteCachedPairs(reportID string) {
 	d.pairsCacheMu.Lock()
 	defer d.pairsCacheMu.Unlock()
-	if d.pairsCache != nil {
-		delete(d.pairsCache, reportID)
-	}
+	delete(d.pairsCache, reportID)
 }
 
 func generateClaimToken() string {
@@ -257,11 +252,6 @@ func (d *DolosService) contestEvidenceCurrent(ctx context.Context, contestID str
 		return false, err
 	}
 	return analyzedEnd == currentEnd && recordedCount == sourceCount && recordedLatest == latestSubmission, nil
-}
-
-func (d *DolosService) GetPairs(ctx context.Context, contestID string, page int) ([]dto.PlagiarismPair, error) {
-	pairs, _, _, err := d.GetPairsWithMeta(ctx, contestID, page)
-	return pairs, err
 }
 
 func (d *DolosService) GetPairsWithMeta(ctx context.Context, contestID string, page int) ([]dto.PlagiarismPair, int, bool, error) {
@@ -814,6 +804,14 @@ func (d *DolosService) ReviewPair(ctx context.Context, contestID, key, expectedR
 		return err
 	}
 	defer tx.Rollback()
+	// Match cascade deletion's contest-before-report lock order.
+	var lockedContest string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM contests WHERE id=$1 FOR KEY SHARE`, contestID).Scan(&lockedContest); err != nil {
+		if err == sql.ErrNoRows {
+			return common.ContestNotFoundError
+		}
+		return err
+	}
 	if err := tx.QueryRowContext(ctx, `
 		SELECT p.dolos_report_id
 		FROM contest_plagiarism_reports p
@@ -994,21 +992,16 @@ func (d *DolosService) processContest(ctx context.Context, contestID string, exp
 		var claimed int
 
 		claimErr := d.db.QueryRowContext(ctx, `
-			INSERT INTO contest_plagiarism_reports(contest_id, problem_id, language, status, claim_token, attempts, next_retry_at, updated_at)
-			VALUES($1, $2, $3, 'processing', $4, 1, NOW() + INTERVAL '3 minutes', NOW())
-			ON CONFLICT(contest_id, problem_id, language)
-			DO UPDATE SET
-				status = 'processing',
-				claim_token = $4,
-				attempts = contest_plagiarism_reports.attempts + 1,
-				next_retry_at = NOW() + INTERVAL '3 minutes',
-				updated_at = NOW()
-			WHERE (
-				(contest_plagiarism_reports.status = 'pending' AND contest_plagiarism_reports.next_retry_at <= NOW())
-				OR (contest_plagiarism_reports.status = 'processing' AND contest_plagiarism_reports.updated_at < NOW() - INTERVAL '3 minutes')
-			) AND contest_plagiarism_reports.attempts < 6
+			UPDATE contest_plagiarism_reports p
+			SET status = 'processing', claim_token = $4, attempts = p.attempts + 1,
+			    next_retry_at = NOW() + INTERVAL '3 minutes', updated_at = NOW()
+			WHERE p.contest_id=$1 AND p.problem_id=$2 AND p.language=$3
+			  AND ((p.status='pending' AND p.next_retry_at<=NOW())
+			       OR (p.status='processing' AND p.updated_at<NOW()-INTERVAL '3 minutes'))
+			  AND p.attempts<6
+			  AND EXISTS (SELECT 1 FROM contest_plagiarism_runs r WHERE r.contest_id=p.contest_id AND r.source_signature=$5)
 			RETURNING 1
-		`, contestID, k.problemID, k.language, claimToken).Scan(&claimed)
+		`, contestID, k.problemID, k.language, claimToken, signature).Scan(&claimed)
 
 		if claimErr == sql.ErrNoRows {
 			continue
