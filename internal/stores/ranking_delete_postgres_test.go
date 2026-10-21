@@ -64,7 +64,7 @@ func TestModerationConcurrentContestDeletionPostgres(t *testing.T) {
 	}}
 	moderationDB := stdlib.OpenDB(*cfg)
 	defer moderationDB.Close()
-	controller := controllers.NewContestController(services.NewContestService(&stores.Storage{Rankings: stores.NewRankingStore(moderationDB)}, nil))
+	controller := controllers.NewContestController(services.NewContestService(&stores.Storage{Rankings: stores.NewRankingStore(moderationDB)}, nil), nil)
 	req := httptest.NewRequest(http.MethodPut, "/admin/"+contest+"/leaderboard/"+user, strings.NewReader(`{"hidden":true}`)).WithContext(ctx)
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	recorder := httptest.NewRecorder()

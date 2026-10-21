@@ -18,12 +18,127 @@ import (
 
 type ContestController struct {
 	contestService *services.ContestService
+	dolosService   *services.DolosService
 }
 
-func NewContestController(contestService *services.ContestService) *ContestController {
+func NewContestController(contestService *services.ContestService, dolosService *services.DolosService) *ContestController {
 	return &ContestController{
 		contestService: contestService,
+		dolosService:   dolosService,
 	}
+}
+
+// GetDolosReport godoc
+// @Summary      Get plagiarism report status (Admin)
+// @Description  Get the Dolos plagiarism detection report status, report URL, and per-problem report breakdown for a contest
+// @Tags         Admin - Contests
+// @Produce      json
+// @Security     BearerAuth
+// @Param        id path string true "Contest ID"
+// @Success      200 {object} services.DolosReport
+// @Failure      401 {object} map[string]string "Unauthorized"
+// @Failure      403 {object} map[string]string "Forbidden - Admin access required"
+// @Failure      404 {object} map[string]string "Contest not found"
+// @Failure      500 {object} map[string]string "Internal server error"
+// @Router       /admin/contest/{id}/plagiarism [get]
+func (cc *ContestController) GetDolosReport(ctx echo.Context) error {
+	report, err := cc.dolosService.GetReport(ctx.Request().Context(), ctx.Param("id"))
+	if err != nil {
+		if errors.Is(err, common.ContestNotFoundError) {
+			return ctx.JSON(http.StatusNotFound, map[string]string{"error": "contest not found"})
+		}
+		log.Errorf("get Dolos report for contest %s: %v", ctx.Param("id"), err)
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to get plagiarism report"})
+	}
+	return ctx.JSON(http.StatusOK, report)
+}
+
+// GetDolosPairs godoc
+// @Summary      Get plagiarism candidate pairs (Admin)
+// @Description  Get matching contestant submission pairs detected by Dolos with similarity scores and review statuses. Returns up to the top 1,000 candidate pairs per problem/language group with similarity >= 20% (0.20), sorted by similarity descending. Sets response headers X-Total-Count, X-Truncated, X-Max-Pairs-Per-Report, and X-Min-Similarity. For complete un-truncated pair evidence beyond 1,000 pairs, inspect the per-group report URL via GET /admin/contest/{id}/plagiarism.
+// @Tags         Admin - Contests
+// @Produce      json
+// @Security     BearerAuth
+// @Param        id path string true "Contest ID"
+// @Param        page query int false "Zero-based page number; 100 pairs per page"
+// @Success      200 {array} dto.PlagiarismPair
+// @Header       200 {integer} X-Total-Count "Total candidate pairs available in the local shortlist across finished reports"
+// @Header       200 {boolean} X-Truncated "True if candidate pairs in any underlying report exceeded the 1,000 pair cap"
+// @Header       200 {integer} X-Max-Pairs-Per-Report "Maximum candidate pairs retained per report (1000)"
+// @Header       200 {string} X-Min-Similarity "Minimum similarity score threshold (0.20)"
+// @Failure      401 {object} map[string]string "Unauthorized"
+// @Failure      403 {object} map[string]string "Forbidden - Admin access required"
+// @Failure      404 {object} map[string]string "Contest not found or no report available"
+// @Failure      409 {object} map[string]string "Plagiarism report is not ready"
+// @Failure      500 {object} map[string]string "Internal server error"
+// @Router       /admin/contest/{id}/plagiarism/pairs [get]
+func (cc *ContestController) GetDolosPairs(ctx echo.Context) error {
+	page := 0
+	if raw := ctx.QueryParam("page"); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed < 0 {
+			return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "page must be a non-negative integer"})
+		}
+		page = parsed
+	}
+	pairs, totalCount, truncated, err := cc.dolosService.GetPairsWithMeta(ctx.Request().Context(), ctx.Param("id"), page)
+	if err != nil {
+		if errors.Is(err, common.ContestNotFoundError) {
+			return ctx.JSON(http.StatusNotFound, map[string]string{"error": "contest not found"})
+		}
+		if errors.Is(err, common.ErrReportNotFound) {
+			return ctx.JSON(http.StatusNotFound, map[string]string{"error": "plagiarism report not found"})
+		}
+		if errors.Is(err, common.ErrReportNotReady) {
+			return ctx.JSON(http.StatusConflict, map[string]string{"error": "plagiarism report is not finished yet"})
+		}
+		log.Errorf("get Dolos pairs for contest %s: %v", ctx.Param("id"), err)
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to retrieve plagiarism pairs"})
+	}
+	ctx.Response().Header().Set("X-Total-Count", strconv.Itoa(totalCount))
+	ctx.Response().Header().Set("X-Truncated", strconv.FormatBool(truncated))
+	ctx.Response().Header().Set("X-Max-Pairs-Per-Report", strconv.Itoa(services.MaxPairsPerReport))
+	ctx.Response().Header().Set("X-Min-Similarity", "0.20")
+	return ctx.JSON(http.StatusOK, pairs)
+}
+
+// ReviewDolosPair godoc
+// @Summary      Review plagiarism pair (Admin)
+// @Description  Record human decision (cleared, confirmed, unreviewed), optional notes, and the displayed report_id for a plagiarism candidate pair
+// @Tags         Admin - Contests
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        id path string true "Contest ID"
+// @Param        pairKey path string true "Base64 URL-encoded pair key"
+// @Param        request body dto.PlagiarismPairReviewRequest true "Review decision and note"
+// @Success      204 "Review saved"
+// @Failure      400 {object} middleware.ValidationErrors "Bad request"
+// @Failure      401 {object} map[string]string "Unauthorized"
+// @Failure      403 {object} map[string]string "Forbidden - Admin access required"
+// @Failure      404 {object} map[string]string "Contest or pair evidence not found"
+// @Failure      409 {object} map[string]string "Plagiarism report is not ready"
+// @Failure      500 {object} map[string]string "Internal server error"
+// @Router       /admin/contest/{id}/plagiarism/pairs/{pairKey} [patch]
+func (cc *ContestController) ReviewDolosPair(ctx echo.Context) error {
+	req := ctx.Get(common.VALIDATED_REQUEST_BODY).(*dto.PlagiarismPairReviewRequest)
+	if err := cc.dolosService.ReviewPair(ctx.Request().Context(), ctx.Param("id"), ctx.Param("pairKey"), req.ReportID, req.Status, req.Note); err != nil {
+		if errors.Is(err, common.ContestNotFoundError) {
+			return ctx.JSON(http.StatusNotFound, map[string]string{"error": "contest not found"})
+		}
+		if errors.Is(err, common.ErrReportNotFound) || errors.Is(err, common.ErrPairNotFound) {
+			return ctx.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+		}
+		if errors.Is(err, common.ErrReportNotReady) {
+			return ctx.JSON(http.StatusConflict, map[string]string{"error": "plagiarism report is not finished yet"})
+		}
+		if errors.Is(err, common.ErrInvalidPairKey) {
+			return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "invalid pair key"})
+		}
+		log.Errorf("review Dolos pair for contest %s: %v", ctx.Param("id"), err)
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update plagiarism review"})
+	}
+	return ctx.NoContent(http.StatusNoContent)
 }
 
 // ModifyRegistration godoc

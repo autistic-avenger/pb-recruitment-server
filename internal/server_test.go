@@ -10,22 +10,36 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-func TestCORSExposesRetryAfter(t *testing.T) {
+func TestCORSExposesResponseHeaders(t *testing.T) {
+	headers := map[string]string{
+		echo.HeaderRetryAfter:    "5",
+		"X-Total-Count":          "1000",
+		"X-Truncated":            "true",
+		"X-Max-Pairs-Per-Report": "1000",
+		"X-Min-Similarity":       "0.20",
+	}
 	e := NewEchoServer(nil, nil)
 	e.POST("/submission/run", func(c echo.Context) error {
-		c.Response().Header().Set(echo.HeaderRetryAfter, "5")
+		for name, value := range headers {
+			c.Response().Header().Set(name, value)
+		}
 		return c.NoContent(http.StatusTooManyRequests)
 	})
 	req := httptest.NewRequest(http.MethodPost, "/submission/run", nil)
 	req.Header.Set(echo.HeaderOrigin, "http://localhost:5173")
 	w := httptest.NewRecorder()
 	e.ServeHTTP(w, req)
-	if w.Code != http.StatusTooManyRequests || w.Header().Get(echo.HeaderRetryAfter) != "5" {
+	if w.Code != http.StatusTooManyRequests {
 		t.Fatal("lost rate-limit response", w.Code, w.Header())
 	}
-	if w.Header().Get(echo.HeaderAccessControlAllowOrigin) != "http://localhost:5173" ||
-		!slices.Contains(strings.Split(w.Header().Get(echo.HeaderAccessControlExposeHeaders), ","), echo.HeaderRetryAfter) {
-		t.Fatal("browser cannot read Retry-After", w.Header())
+	if w.Header().Get(echo.HeaderAccessControlAllowOrigin) != "http://localhost:5173" {
+		t.Fatal("frontend origin not allowed", w.Header())
+	}
+	exposed := strings.Split(w.Header().Get(echo.HeaderAccessControlExposeHeaders), ",")
+	for name, value := range headers {
+		if w.Header().Get(name) != value || !slices.Contains(exposed, name) {
+			t.Errorf("browser cannot read %s: %v", name, w.Header())
+		}
 	}
 }
 

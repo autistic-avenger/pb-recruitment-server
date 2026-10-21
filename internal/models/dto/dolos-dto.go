@@ -1,0 +1,37 @@
+package dto
+
+type PlagiarismPairReviewRequest struct {
+	Status   string `json:"status" validate:"required,oneof=cleared confirmed unreviewed"`
+	Note     string `json:"note" validate:"max=1000"`
+	ReportID string `json:"report_id" validate:"required"`
+}
+
+type PlagiarismPair struct {
+	Key             string  `json:"key"`
+	ReportID        string  `json:"report_id"`
+	LeftFile        string  `json:"left_file"`
+	LeftUserID      string  `json:"left_user_id"`
+	LeftName        string  `json:"left_name,omitempty"`
+	RightFile       string  `json:"right_file"`
+	RightUserID     string  `json:"right_user_id"`
+	RightName       string  `json:"right_name,omitempty"`
+	Similarity      float64 `json:"similarity"`
+	LongestFragment int     `json:"longest_fragment"`
+	TotalOverlap    int     `json:"total_overlap"`
+	ReviewStatus    string  `json:"review_status"`
+	ReviewNote      string  `json:"review_note,omitempty"`
+}
+
+type ProblemReportSummary struct {
+	ProblemID string `json:"problem_id"`
+	Language  string `json:"language"`
+	Status    string `json:"status"`
+	ReportURL string `json:"report_url,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+type DolosContestReportResponse struct {
+	Status  string                 `json:"status"`
+	Error   string                 `json:"error,omitempty"`
+	Reports []ProblemReportSummary `json:"reports,omitempty"`
+}

@@ -30,4 +30,8 @@ var (
 	ErrRateLimitExceeded           = errors.New("rate limit exceeded, please wait before submitting again")
 	ErrContestNotClosed            = errors.New("contest has not closed yet")
 	ErrPendingSubmissionsExist     = errors.New("pending submissions exist for contest")
+	ErrReportNotFound              = errors.New("plagiarism report not found")
+	ErrReportNotReady              = errors.New("plagiarism report is not finished yet")
+	ErrPairNotFound                = errors.New("plagiarism pair not found in report")
+	ErrInvalidPairKey              = errors.New("invalid pair key")
 )

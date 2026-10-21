@@ -23,10 +23,10 @@ make swagger
 - Add `DB_ADDR` to `.env`
 - Run these commands from the backend directory. Include `$HOME/go/bin` in `PATH`
   if `migrate` was installed with `go install`.
-- The current schema requires migrations through `000032`: submission cooldowns
+- The current schema requires migrations through `000033`: submission cooldowns
   (`000027`), saved final ranks (`000028`), internal compiler diagnostics (`000029`),
-  Judge0 recovery state (`000030`), ordered recovery claims (`000031`), and a
-  single recovery deadline with the superseded polling index removed (`000032`).
+  Judge0 recovery state (`000030`), ordered recovery claims (`000031`), a single recovery deadline
+  (`000032`), and Dolos plagiarism detection (`000033`).
   `make migrate-up` applies only pending migrations; do not force the version or
   roll back a production database.
 
@@ -245,7 +245,42 @@ five-idle database pool settings, and keep Run disabled during initial validatio
 Test 600 clients with the actual testcase counts, representative languages, bursty
 submissions and delayed results. Check time to drain, rejected requests, CPU/memory,
 database waits and final scores; then repeat with Run before enabling it. Synthetic
-S3/Judge0 tests and increasing the queue cap alone cannot establish fleet capacity.
+S3/Judge0 tests cannot establish fleet capacity.
+
+### Dolos plagiarism checks
+
+When `DOLOS_API_URL` is configured, a background worker runs every 15 seconds to identify ended contests
+that have reached a 30-second settling window. For each problem and supported language (Python, C++, C, Java,
+JavaScript, Go), the worker archives the latest code submission for each contestant into a separate comparison
+dataset. Groups with fewer than two distinct contestants are skipped.
+
+Set `DOLOS_API_URL` to `https://dolos.ugent.be/api` for the public Dolos API or to a self-hosted Dolos API endpoint.
+Leaving `DOLOS_API_URL` empty disables automated checks. Note that public reports are accessible by anyone holding
+the report URL, and the public Dolos service enforces a strict 10 MB archive limit.
+
+Admin REST APIs:
+- `GET /admin/contest/{id}/plagiarism`: Retrieves overall status, public report URL (if ready), and individual per-problem/language report statuses.
+- `GET /admin/contest/{id}/plagiarism/pairs`: Retrieves matching submission pairs across finished problem reports with similarity metrics and human review decisions. Returns a paginated shortlist of up to 1,000 candidate pairs per problem/language group with similarity >= 20% (0.20), sorted by similarity descending. Response headers include `X-Total-Count`, `X-Truncated` (`true` when any group exceeds 1,000 qualifying pairs), `X-Max-Pairs-Per-Report`, and `X-Min-Similarity`. For exhaustive review beyond the 1,000-pair shortlist, consult the complete per-group Dolos report URL from `GET /admin/contest/{id}/plagiarism`.
+- `PATCH /admin/contest/{id}/plagiarism/pairs/{pairKey}`: Records human review decisions (`cleared`, `confirmed`, `unreviewed`) with an optional note (up to 1000 characters) for a verified pair in the report evidence.
+
+Apply migration `000033` before deploying. Pair review PATCH requests must include the displayed `report_id`. Note that frontend UI integration for Dolos is not yet shipped; these endpoints are accessible via admin API clients.
+
+#### Rerunning Plagiarism Checks
+
+After inspecting the report error, reset known failures or purged provider reports with:
+
+```sql
+UPDATE contest_plagiarism_reports
+SET status = 'pending', attempts = 0, claim_token = NULL, error = NULL, next_retry_at = NOW(), uploaded_at = NULL, updated_at = NOW()
+WHERE contest_id = '<contest_id>'
+  AND status IN ('failed', 'error', 'purged', 'unavailable')
+  AND COALESCE(error, '') NOT LIKE 'Dolos upload outcome is ambiguous%';
+```
+
+An interrupted upload or lost response may mean Dolos accepted the dataset without returning its ID.
+Errors starting with `Dolos upload outcome is ambiguous` require operator resolution and are excluded above.
+Reconcile the remote outcome before clearing that state. If it cannot be resolved, reuploading deliberately
+creates another external dataset and may leave the original dataset without a locally known ID.
 
 ### Local connection to the EC2 judge
 
