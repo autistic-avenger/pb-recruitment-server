@@ -47,6 +47,9 @@ func NewEchoServer(
 			"X-Total-Count",
 			"X-Total-Pages",
 			"X-Current-Page",
+			"X-Truncated",
+			"X-Max-Pairs-Per-Report",
+			"X-Min-Similarity",
 		},
 		AllowCredentials: true,
 	}))

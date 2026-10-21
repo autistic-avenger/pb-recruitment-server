@@ -267,13 +267,20 @@ Apply migration `000033` before deploying. Pair review PATCH requests must inclu
 
 #### Rerunning Plagiarism Checks
 
-If an upload was interrupted, failed due to transient provider errors, or provider report data was purged:
+After inspecting the report error, reset known failures or purged provider reports with:
 
 ```sql
 UPDATE contest_plagiarism_reports
 SET status = 'pending', attempts = 0, claim_token = NULL, error = NULL, next_retry_at = NOW(), uploaded_at = NULL, updated_at = NOW()
-WHERE contest_id = '<contest_id>' AND status IN ('failed', 'error', 'purged', 'unavailable');
+WHERE contest_id = '<contest_id>'
+  AND status IN ('failed', 'error', 'purged', 'unavailable')
+  AND COALESCE(error, '') NOT LIKE 'Dolos upload outcome is ambiguous%';
 ```
+
+An interrupted upload or lost response may mean Dolos accepted the dataset without returning its ID.
+Errors starting with `Dolos upload outcome is ambiguous` require operator resolution and are excluded above.
+Reconcile the remote outcome before clearing that state. If it cannot be resolved, reuploading deliberately
+creates another external dataset and may leave the original dataset without a locally known ID.
 
 ### Local connection to the EC2 judge
 

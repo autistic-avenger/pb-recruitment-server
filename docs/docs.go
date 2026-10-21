@@ -529,6 +529,24 @@ const docTemplate = `{
                             "items": {
                                 "$ref": "#/definitions/app_internal_models_dto.PlagiarismPair"
                             }
+                        },
+                        "headers": {
+                            "X-Max-Pairs-Per-Report": {
+                                "type": "integer",
+                                "description": "Maximum candidate pairs retained per report (1000)"
+                            },
+                            "X-Min-Similarity": {
+                                "type": "string",
+                                "description": "Minimum similarity score threshold (0.20)"
+                            },
+                            "X-Total-Count": {
+                                "type": "integer",
+                                "description": "Total candidate pairs available in the local shortlist across finished reports"
+                            },
+                            "X-Truncated": {
+                                "type": "boolean",
+                                "description": "True if candidate pairs in any underlying report exceeded the 1,000 pair cap"
+                            }
                         }
                     },
                     "401": {

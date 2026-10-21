@@ -61,11 +61,11 @@ func (cc *ContestController) GetDolosReport(ctx echo.Context) error {
 // @Security     BearerAuth
 // @Param        id path string true "Contest ID"
 // @Param        page query int false "Zero-based page number; 100 pairs per page"
+// @Success      200 {array} dto.PlagiarismPair
 // @Header       200 {integer} X-Total-Count "Total candidate pairs available in the local shortlist across finished reports"
 // @Header       200 {boolean} X-Truncated "True if candidate pairs in any underlying report exceeded the 1,000 pair cap"
 // @Header       200 {integer} X-Max-Pairs-Per-Report "Maximum candidate pairs retained per report (1000)"
 // @Header       200 {string} X-Min-Similarity "Minimum similarity score threshold (0.20)"
-// @Success      200 {array} dto.PlagiarismPair
 // @Failure      401 {object} map[string]string "Unauthorized"
 // @Failure      403 {object} map[string]string "Forbidden - Admin access required"
 // @Failure      404 {object} map[string]string "Contest not found or no report available"
