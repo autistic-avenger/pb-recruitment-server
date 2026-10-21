@@ -4,11 +4,13 @@ import (
 	"app/internal/s3"
 	"container/heap"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"app/internal/models/dto"
@@ -347,5 +349,40 @@ func TestPairMinHeapDeterministicTieBreaking(t *testing.T) {
 	maxElem := heap.Pop(h).(dto.PlagiarismPair)
 	if maxElem.Key != "key-b" {
 		t.Errorf("expected remaining key-b, got %s", maxElem.Key)
+	}
+}
+
+func TestMakeArchiveChecksFinalizedSize(t *testing.T) {
+	var reads atomic.Int32
+	store := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reads.Add(1)
+		fmt.Fprint(w, "cHJpbnQoMSk=")
+	}))
+	defer store.Close()
+	for key, value := range map[string]string{
+		"AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test", "AWS_SESSION_TOKEN": "",
+		"AWS_REGION": "us-east-1", "AWS_EC2_METADATA_DISABLED": "true",
+		"AWS_CONFIG_FILE": os.DevNull, "AWS_SHARED_CREDENTIALS_FILE": os.DevNull,
+		"AWS_ENDPOINT_URL_S3": store.URL, "S3_SUBMISSIONS_BUCKET": "test",
+	} {
+		t.Setenv(key, value)
+	}
+	svc := &DolosService{s3: s3.NewS3Client()}
+	small := []dolosSource{{id: "source", problemID: "problem", language: "python"}}
+	if archive, err := svc.makeArchive(context.Background(), small); err != nil || len(archive) == 0 {
+		t.Fatalf("small archive: bytes=%d err=%v", len(archive), err)
+	}
+	reads.Store(0)
+	// Long entry names push the ZIP over the limit only when Close writes its central directory.
+	sources := make([]dolosSource, 90)
+	for i := range sources {
+		sources[i] = dolosSource{id: fmt.Sprintf("source-%d", i), problemID: strings.Repeat("p", 60000), language: "python"}
+	}
+	archive, err := svc.makeArchive(context.Background(), sources)
+	if !errors.Is(err, errDolosArchiveTooLarge) || archive != nil {
+		t.Fatalf("expected permanent size error after finalization, bytes=%d err=%v", len(archive), err)
+	}
+	if reads.Load() != int32(len(sources)) {
+		t.Fatalf("archive rejected before finalization: reads=%d", reads.Load())
 	}
 }

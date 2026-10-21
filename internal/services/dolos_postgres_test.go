@@ -6,6 +6,7 @@ import (
 	"app/internal/s3"
 	"app/internal/stores"
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"errors"
@@ -418,5 +419,129 @@ func TestDolosReviewAndContestDeletionPostgres(t *testing.T) {
 	var remaining int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM contests WHERE id='contest'`).Scan(&remaining); err != nil || remaining != 0 {
 		t.Fatalf("contest not deleted: count=%d err=%v", remaining, err)
+	}
+}
+
+func TestDolosLateCSVNotFoundPreservesAmbiguousUploadPostgres(t *testing.T) {
+	db, _ := dolosPostgresDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := db.ExecContext(ctx, `
+  INSERT INTO contests(id, name, registration_start_time, registration_end_time, start_time, end_time)
+  VALUES('contest', 'Synthetic', 0, 0, 0, 1);
+  INSERT INTO problems(id, contest_id, name, score, type) VALUES('problem', 'contest', 'Synthetic', 1, 'code');
+  INSERT INTO contest_plagiarism_reports(contest_id, problem_id, language, status, dolos_report_id)
+  VALUES('contest', 'problem', 'python', 'finished', 'old-report');
+ `); err != nil {
+		t.Fatal(err)
+	}
+	arrived, release := make(chan struct{}), make(chan struct{})
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(arrived)
+		select {
+		case <-release:
+			http.NotFound(w, r)
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(provider.Close)
+	svc := &DolosService{db: db, client: provider.Client(), baseURL: provider.URL}
+	done := make(chan error, 1)
+	go func() { _, err := svc.openReportPairsCSV(ctx, "old-report"); done <- err }()
+	select {
+	case <-arrived:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	// A replacement upload failed after provider acceptance while the old CSV request was in flight.
+	const ambiguousError = "Dolos upload outcome is ambiguous: synthetic connection loss"
+	if _, err := db.ExecContext(ctx, `UPDATE contest_plagiarism_reports SET status='failed', error=$1 WHERE contest_id='contest'`, ambiguousError); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-done; !errors.Is(err, common.ErrReportNotFound) {
+		t.Fatalf("late CSV response: %v", err)
+	}
+	var status, message string
+	if err := db.QueryRowContext(ctx, `SELECT status, error FROM contest_plagiarism_reports`).Scan(&status, &message); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || message != ambiguousError {
+		t.Fatalf("late CSV response overwrote upload outcome: status=%q error=%q", status, message)
+	}
+	result, err := db.ExecContext(ctx, `
+  UPDATE contest_plagiarism_reports SET status='pending', attempts=0, claim_token=NULL, error=NULL,
+   next_retry_at=NOW(), uploaded_at=NULL, updated_at=NOW()
+  WHERE contest_id='contest' AND status IN ('failed','error','purged','unavailable')
+   AND COALESCE(error,'') NOT LIKE 'Dolos upload outcome is ambiguous%'
+ `)
+	if err != nil {
+		t.Fatal(err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if affected != 0 {
+		t.Fatalf("routine reset must exclude ambiguous uploads, updated %d rows", affected)
+	}
+}
+
+func TestDolosOversizedArchiveFailsPermanentlyPostgres(t *testing.T) {
+	db, _ := dolosPostgresDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	if _, err := db.ExecContext(ctx, `INSERT INTO contests(id,name,registration_start_time,registration_end_time,start_time,end_time) VALUES('contest','Synthetic',0,0,0,1); INSERT INTO problems(id,contest_id,name,score,type) VALUES('problem','contest','Synthetic',1,'code')`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 21; i++ {
+		if _, err := db.ExecContext(ctx, `INSERT INTO submissions(id,user_id,contest_id,problem_id,type,language,status,created_at) VALUES($1,$2,'contest','problem','code','python','accepted',1)`, fmt.Sprintf("source-%02d", i), fmt.Sprintf("user-%02d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data := make([]byte, 540*1024)
+	if _, err := rand.Read(data); err != nil {
+		t.Fatal(err)
+	}
+	source := "#" + base64.StdEncoding.EncodeToString(data) + "\n"
+	stored := base64.StdEncoding.EncodeToString([]byte(source))
+	if len(stored) >= 1024*1024 {
+		t.Fatal("fixture exceeds per-object limit")
+	}
+	var reads, posts atomic.Int32
+	store := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reads.Add(1); fmt.Fprint(w, stored) }))
+	defer store.Close()
+	for k, v := range map[string]string{"AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test", "AWS_SESSION_TOKEN": "", "AWS_REGION": "us-east-1", "AWS_EC2_METADATA_DISABLED": "true", "AWS_CONFIG_FILE": os.DevNull, "AWS_SHARED_CREDENTIALS_FILE": os.DevNull, "AWS_ENDPOINT_URL_S3": store.URL, "S3_SUBMISSIONS_BUCKET": "test"} {
+		t.Setenv(k, v)
+	}
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		fmt.Fprint(w, `{"id":"unexpected","status":"finished"}`)
+	}))
+	defer provider.Close()
+	service := &DolosService{db: db, s3: s3.NewS3Client(), baseURL: provider.URL, client: provider.Client()}
+	if err := service.processContest(ctx, "contest", 1); err != nil {
+		t.Fatal(err)
+	}
+	firstReads := reads.Load()
+	var status, msg string
+	var attempts int
+	if err := db.QueryRowContext(ctx, `SELECT status,error,attempts FROM contest_plagiarism_reports`).Scan(&status, &msg, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || !strings.Contains(msg, "exceeds 10 MB limit") || attempts != 1 || posts.Load() != 0 {
+		t.Fatalf("status=%s attempts=%d reads=%d posts=%d error=%s", status, attempts, reads.Load(), posts.Load(), msg)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE contest_plagiarism_reports SET next_retry_at=NOW()`); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.processContest(ctx, "contest", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT status,attempts FROM contest_plagiarism_reports`).Scan(&status, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || attempts != 1 || reads.Load() != firstReads || posts.Load() != 0 {
+		t.Fatalf("status=%s attempts=%d reads=%d first=%d posts=%d", status, attempts, reads.Load(), firstReads, posts.Load())
 	}
 }

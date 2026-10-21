@@ -75,6 +75,8 @@ type dolosSource struct {
 	language  string
 }
 
+var errDolosArchiveTooLarge = errors.New("Dolos archive exceeds 10 MB limit")
+
 func NewDolosService(db *sql.DB, objectStore *s3.S3) *DolosService {
 	base := strings.TrimRight(os.Getenv("DOLOS_API_URL"), "/")
 	return &DolosService{
@@ -551,7 +553,7 @@ func (d *DolosService) openReportPairsCSV(ctx context.Context, reportID string) 
 	if resp.StatusCode == http.StatusNotFound {
 		resp.Body.Close()
 		if d.db != nil {
-			_, _ = d.db.ExecContext(ctx, `UPDATE contest_plagiarism_reports SET status='purged', error='Report data was purged or not found on Dolos provider', updated_at=NOW() WHERE dolos_report_id=$1`, reportID)
+			_, _ = d.db.ExecContext(ctx, `UPDATE contest_plagiarism_reports SET status='purged', error='Report data was purged or not found on Dolos provider', updated_at=NOW() WHERE dolos_report_id=$1 AND status='finished'`, reportID)
 		}
 		d.deleteCachedPairs(reportID)
 		return nil, common.ErrReportNotFound
@@ -1012,15 +1014,7 @@ func (d *DolosService) processContest(ctx context.Context, contestID string, exp
 
 		archive, err := d.makeArchiveWithLease(ctx, contestID, k.problemID, k.language, claimToken, srcList)
 		if err != nil {
-			if saveErr := d.saveGroupError(ctx, contestID, k.problemID, k.language, claimToken, err, false); saveErr != nil {
-				return saveErr
-			}
-			continue
-		}
-		const maxZipLimit = 10 * 1024 * 1024
-		if len(archive) >= maxZipLimit {
-			permErr := fmt.Errorf("Dolos archive size (%d bytes) exceeds 10 MB limit", len(archive))
-			if saveErr := d.saveGroupError(ctx, contestID, k.problemID, k.language, claimToken, permErr, true); saveErr != nil {
+			if saveErr := d.saveGroupError(ctx, contestID, k.problemID, k.language, claimToken, err, errors.Is(err, errDolosArchiveTooLarge)); saveErr != nil {
 				return saveErr
 			}
 			continue
@@ -1364,12 +1358,15 @@ func (d *DolosService) makeArchive(ctx context.Context, sources []dolosSource) (
 
 		if buf.Len() >= maxArchiveBytes {
 			zw.Close()
-			return nil, fmt.Errorf("archive size exceeds 10 MB limit while packaging")
+			return nil, errDolosArchiveTooLarge
 		}
 	}
 
 	if err := zw.Close(); err != nil {
 		return nil, err
+	}
+	if buf.Len() >= maxArchiveBytes {
+		return nil, errDolosArchiveTooLarge
 	}
 	return buf.Bytes(), nil
 }
