@@ -25,6 +25,7 @@ func NewEchoServer(
 		AllowOrigins: []string{
 			"https://recruitment.pointblank.club",
 			"http://recruitment.pointblank.club",
+			"https://pb-recruitment-website-green.vercel.app",
 			"http://localhost:5173",
 			"http://127.0.0.1:5173",
 		},
@@ -47,6 +48,9 @@ func NewEchoServer(
 			"X-Total-Count",
 			"X-Total-Pages",
 			"X-Current-Page",
+			"X-Truncated",
+			"X-Max-Pairs-Per-Report",
+			"X-Min-Similarity",
 		},
 		AllowCredentials: true,
 	}))

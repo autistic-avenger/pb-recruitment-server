@@ -32,4 +32,8 @@ var (
 	ErrContestNotClosed            = errors.New("contest has not closed yet")
 	ErrPendingSubmissionsExist     = errors.New("pending submissions exist for contest")
 	ErrContestNotStarted           = errors.New("contest has not started yet")
+	ErrReportNotFound              = errors.New("plagiarism report not found")
+	ErrReportNotReady              = errors.New("plagiarism report is not finished yet")
+	ErrPairNotFound                = errors.New("plagiarism pair not found in report")
+	ErrInvalidPairKey              = errors.New("invalid pair key")
 )

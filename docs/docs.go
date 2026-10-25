@@ -421,6 +421,283 @@ const docTemplate = `{
                 }
             }
         },
+        "/admin/contest/{id}/plagiarism": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Get the Dolos plagiarism detection report status, report URL, and per-problem report breakdown for a contest",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Admin - Contests"
+                ],
+                "summary": "Get plagiarism report status (Admin)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Contest ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/app_internal_services.DolosReport"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden - Admin access required",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Contest not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/admin/contest/{id}/plagiarism/pairs": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Get matching contestant submission pairs detected by Dolos with similarity scores and review statuses. Returns up to the top 1,000 candidate pairs per problem/language group with similarity \u003e= 20% (0.20), sorted by similarity descending. Sets response headers X-Total-Count, X-Truncated, X-Max-Pairs-Per-Report, and X-Min-Similarity. For complete un-truncated pair evidence beyond 1,000 pairs, inspect the per-group report URL via GET /admin/contest/{id}/plagiarism.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Admin - Contests"
+                ],
+                "summary": "Get plagiarism candidate pairs (Admin)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Contest ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Zero-based page number; 100 pairs per page",
+                        "name": "page",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/app_internal_models_dto.PlagiarismPair"
+                            }
+                        },
+                        "headers": {
+                            "X-Max-Pairs-Per-Report": {
+                                "type": "integer",
+                                "description": "Maximum candidate pairs retained per report (1000)"
+                            },
+                            "X-Min-Similarity": {
+                                "type": "string",
+                                "description": "Minimum similarity score threshold (0.20)"
+                            },
+                            "X-Total-Count": {
+                                "type": "integer",
+                                "description": "Total candidate pairs available in the local shortlist across finished reports"
+                            },
+                            "X-Truncated": {
+                                "type": "boolean",
+                                "description": "True if candidate pairs in any underlying report exceeded the 1,000 pair cap"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden - Admin access required",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Contest not found or no report available",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "Plagiarism report is not ready",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/admin/contest/{id}/plagiarism/pairs/{pairKey}": {
+            "patch": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Record human decision (cleared, confirmed, unreviewed), optional notes, and the displayed report_id for a plagiarism candidate pair",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Admin - Contests"
+                ],
+                "summary": "Review plagiarism pair (Admin)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Contest ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Base64 URL-encoded pair key",
+                        "name": "pairKey",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Review decision and note",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/app_internal_models_dto.PlagiarismPairReviewRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Review saved"
+                    },
+                    "400": {
+                        "description": "Bad request",
+                        "schema": {
+                            "$ref": "#/definitions/app_internal_middleware.ValidationErrors"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden - Admin access required",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Contest or pair evidence not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "Plagiarism report is not ready",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/admin/contests/list": {
             "get": {
                 "security": [
@@ -2899,6 +3176,74 @@ const docTemplate = `{
                 }
             }
         },
+        "app_internal_models_dto.PlagiarismPair": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string"
+                },
+                "left_file": {
+                    "type": "string"
+                },
+                "left_name": {
+                    "type": "string"
+                },
+                "left_user_id": {
+                    "type": "string"
+                },
+                "longest_fragment": {
+                    "type": "integer"
+                },
+                "report_id": {
+                    "type": "string"
+                },
+                "review_note": {
+                    "type": "string"
+                },
+                "review_status": {
+                    "type": "string"
+                },
+                "right_file": {
+                    "type": "string"
+                },
+                "right_name": {
+                    "type": "string"
+                },
+                "right_user_id": {
+                    "type": "string"
+                },
+                "similarity": {
+                    "type": "number"
+                },
+                "total_overlap": {
+                    "type": "integer"
+                }
+            }
+        },
+        "app_internal_models_dto.PlagiarismPairReviewRequest": {
+            "type": "object",
+            "required": [
+                "report_id",
+                "status"
+            ],
+            "properties": {
+                "note": {
+                    "type": "string",
+                    "maxLength": 1000
+                },
+                "report_id": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "cleared",
+                        "confirmed",
+                        "unreviewed"
+                    ]
+                }
+            }
+        },
         "app_internal_models_dto.ProblemOverview": {
             "type": "object",
             "properties": {
@@ -2913,6 +3258,26 @@ const docTemplate = `{
                 },
                 "type": {
                     "$ref": "#/definitions/app_internal_models.SubmissionType"
+                }
+            }
+        },
+        "app_internal_models_dto.ProblemReportSummary": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string"
+                },
+                "language": {
+                    "type": "string"
+                },
+                "problem_id": {
+                    "type": "string"
+                },
+                "report_url": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
                 }
             }
         },
@@ -3171,6 +3536,23 @@ const docTemplate = `{
                 },
                 "start_time": {
                     "type": "integer"
+                }
+            }
+        },
+        "app_internal_services.DolosReport": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string"
+                },
+                "reports": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/app_internal_models_dto.ProblemReportSummary"
+                    }
+                },
+                "status": {
+                    "type": "string"
                 }
             }
         }
