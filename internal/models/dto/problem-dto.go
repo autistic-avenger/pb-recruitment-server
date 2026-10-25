@@ -7,10 +7,12 @@ import (
 )
 
 type ProblemOverview struct {
-	ID    string                `json:"id"`
-	Name  string                `json:"name"`
-	Score int                   `json:"score"`
-	Type  models.SubmissionType `json:"type"`
+	ID          string                `json:"id"`
+	Name        string                `json:"name"`
+	Score       int                   `json:"score"`
+	Type        models.SubmissionType `json:"type"`
+	TimeLimit   int                   `json:"time_limit,omitempty"`
+	MemoryLimit int                   `json:"memory_limit,omitempty"`
 }
 
 type GetProblemStatementResponse struct {

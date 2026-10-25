@@ -35,6 +35,8 @@ func (s *ProblemStore) CreateProblem(ctx context.Context, p *models.Problem) err
 	if memoryLimit <= 0 {
 		memoryLimit = 256
 	}
+	p.TimeLimit = timeLimit
+	p.MemoryLimit = memoryLimit
 
 	const q = `
 		INSERT INTO problems (id, contest_id, name, score, type, answer, options, description, has_multiple_answers, testcases, time_limit, memory_limit)
@@ -76,6 +78,8 @@ func (s *ProblemStore) UpdateProblem(ctx context.Context, p *models.Problem) err
 	if memoryLimit <= 0 {
 		memoryLimit = 256
 	}
+	p.TimeLimit = timeLimit
+	p.MemoryLimit = memoryLimit
 
 	const q = `
         UPDATE problems
@@ -134,7 +138,7 @@ func (s *ProblemStore) DeleteProblem(ctx context.Context, contestID string, prob
 
 func (s *ProblemStore) GetProblemList(ctx context.Context, contestID string) ([]dto.ProblemOverview, error) {
 	const q = `
-		SELECT id, name, score, type
+		SELECT id, name, score, type, COALESCE(time_limit, 1000), COALESCE(memory_limit, 256)
 		FROM problems
 		WHERE contest_id = $1
 	`
@@ -150,7 +154,7 @@ func (s *ProblemStore) GetProblemList(ctx context.Context, contestID string) ([]
 	for rows.Next() {
 		var p dto.ProblemOverview
 
-		if err := rows.Scan(&p.ID, &p.Name, &p.Score, &p.Type); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Score, &p.Type, &p.TimeLimit, &p.MemoryLimit); err != nil {
 			log.Printf("problem-store: row scan failed: %v", err)
 			return nil, fmt.Errorf("scan problem row: %w", err)
 		}
