@@ -1726,6 +1726,15 @@ const docTemplate = `{
                             }
                         }
                     },
+                    "403": {
+                        "description": "Contest has not started yet",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
                     "404": {
                         "description": "Contest not found",
                         "schema": {
@@ -3250,10 +3259,16 @@ const docTemplate = `{
                 "id": {
                     "type": "string"
                 },
+                "memory_limit": {
+                    "type": "integer"
+                },
                 "name": {
                     "type": "string"
                 },
                 "score": {
+                    "type": "integer"
+                },
+                "time_limit": {
                     "type": "integer"
                 },
                 "type": {
