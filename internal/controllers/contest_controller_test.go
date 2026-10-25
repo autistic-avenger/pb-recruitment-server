@@ -514,7 +514,7 @@ func TestGetLeaderboardController(t *testing.T) {
 			},
 			Rankings: &mockRankingStore{},
 		}
-		controller := NewContestController(services.NewContestService(storage, nil))
+		controller := NewContestController(services.NewContestService(storage, nil), nil)
 		recorder := httptest.NewRecorder()
 		ctx := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/contests/c1/leaderboard", nil), recorder)
 		ctx.SetParamNames("id")
@@ -533,7 +533,7 @@ func TestGetLeaderboardController(t *testing.T) {
 			Contests: submissionContestStore{err: common.ContestNotFoundError},
 			Rankings: &mockRankingStore{},
 		}
-		controller := NewContestController(services.NewContestService(storage, nil))
+		controller := NewContestController(services.NewContestService(storage, nil), nil)
 		recorder := httptest.NewRecorder()
 		ctx := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/contests/c999/leaderboard", nil), recorder)
 		ctx.SetParamNames("id")
@@ -564,7 +564,7 @@ func TestGetLeaderboardController(t *testing.T) {
 			},
 			Rankings: rankStore,
 		}
-		controller := NewContestController(services.NewContestService(storage, nil))
+		controller := NewContestController(services.NewContestService(storage, nil), nil)
 		recorder := httptest.NewRecorder()
 		ctx := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/contests/c1/leaderboard?page=1", nil), recorder)
 		ctx.SetParamNames("id")
