@@ -215,7 +215,7 @@ func (cc *ContestController) HandleUpdateContest(ctx echo.Context) error {
 	}
 	if contest.GetRunningStatus() != models.ContestRunningUpcoming && req.StartTime != contest.StartTime {
 		return ctx.JSON(http.StatusConflict, map[string]string{
-			"error": "start time cannot be changed after the contest starts",
+			"error": common.ErrContestStartTimeLocked.Error(),
 		})
 	}
 
