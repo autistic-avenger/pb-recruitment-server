@@ -31,4 +31,5 @@ var (
 	ErrRateLimitExceeded           = errors.New("rate limit exceeded, please wait before submitting again")
 	ErrContestNotClosed            = errors.New("contest has not closed yet")
 	ErrPendingSubmissionsExist     = errors.New("pending submissions exist for contest")
+	ErrContestNotStarted           = errors.New("contest has not started yet")
 )

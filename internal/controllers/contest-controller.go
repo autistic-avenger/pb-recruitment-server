@@ -783,6 +783,7 @@ func (cc *ContestController) GetProblemAnswers(ctx echo.Context) error {
 // @Header       200 {string} X-Total-Count "Total count of leaderboard entries"
 // @Header       200 {string} X-Total-Pages "Total pages"
 // @Header       200 {string} X-Current-Page "Current page"
+// @Failure      403 {object} map[string]string "Contest has not started yet"
 // @Failure      404 {object} map[string]string "Contest not found"
 // @Failure      500 {object} map[string]string "Internal server error"
 // @Router       /contests/{id}/leaderboard [get]
@@ -800,6 +801,11 @@ func (cc *ContestController) GetLeaderboard(ctx echo.Context) error {
 		if errors.Is(err, common.ContestNotFoundError) {
 			return ctx.JSON(http.StatusNotFound, map[string]string{
 				"error": common.ContestNotFoundError.Error(),
+			})
+		}
+		if errors.Is(err, common.ErrContestNotStarted) || errors.Is(err, common.ContestNotRunningError) {
+			return ctx.JSON(http.StatusForbidden, map[string]string{
+				"error": err.Error(),
 			})
 		}
 		log.Errorf("failed to get leaderboard for contest %s: %v", contestID, err)
