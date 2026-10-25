@@ -19,7 +19,7 @@ var (
 	UserNotRegisteredError         = errors.New("user not registered")
 	ContestNotRunningError         = errors.New("contest is not running")
 	ContestRegistrationClosedError = errors.New("contest registration is closed")
-	InvalidYearError               = errors.New("invalid year")
+	InvalidYearError               = errors.New("you are not eligible for this contest based on your academic year")
 	KeyNotFoundError               = errors.New("key not found")
 	KeyAlreadyExistsError          = errors.New("key already exists")
 	ErrUnsupportedLanguage         = errors.New("unsupported language")
