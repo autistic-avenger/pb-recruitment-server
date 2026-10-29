@@ -2891,10 +2891,10 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "memory_limit": {
-                    "description": "MB; Judge0 max_memory_limit is 512000 KB",
+                    "description": "MB; Judge0 accepts 2048-512000 KB",
                     "type": "integer",
                     "maximum": 500,
-                    "minimum": 1
+                    "minimum": 2
                 },
                 "name": {
                     "type": "string"

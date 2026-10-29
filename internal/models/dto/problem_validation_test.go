@@ -69,6 +69,10 @@ func TestCreateProblemRequestTestcaseValidation(t *testing.T) {
 			Name: "p", Description: "d", Score: 10, Type: "code",
 			Testcases: []CreateTestCaseRequest{{}}, MemoryLimit: 501,
 		}, true},
+		{"memory limit below Judge0 minimum", CreateProblemRequest{
+			Name: "p", Description: "d", Score: 10, Type: "code",
+			Testcases: []CreateTestCaseRequest{{}}, MemoryLimit: 1,
+		}, true},
 		{"negative limit", CreateProblemRequest{
 			Name: "p", Description: "d", Score: 10, Type: "code",
 			Testcases: []CreateTestCaseRequest{{}}, TimeLimit: -1,
