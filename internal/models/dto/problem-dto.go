@@ -7,10 +7,12 @@ import (
 )
 
 type ProblemOverview struct {
-	ID    string                `json:"id"`
-	Name  string                `json:"name"`
-	Score int                   `json:"score"`
-	Type  models.SubmissionType `json:"type"`
+	ID          string                `json:"id"`
+	Name        string                `json:"name"`
+	Score       int                   `json:"score"`
+	Type        models.SubmissionType `json:"type"`
+	TimeLimit   int                   `json:"time_limit,omitempty"`
+	MemoryLimit int                   `json:"memory_limit,omitempty"`
 }
 
 type GetProblemStatementResponse struct {
@@ -36,8 +38,8 @@ type CreateProblemRequest struct {
 	Answer      []int                   `json:"answer,omitempty" validate:"required_if=Type mcq,omitempty,min=1,unique,dive,gte=0"`
 	Options     []string                `json:"options,omitempty" validate:"required_if=Type mcq,omitempty,min=2,dive,required"`
 	Testcases   []CreateTestCaseRequest `json:"testcases,omitempty" validate:"required_if=Type code,dive"`
-	TimeLimit   int                     `json:"time_limit,omitempty"`
-	MemoryLimit int                     `json:"memory_limit,omitempty"`
+	TimeLimit   int                     `json:"time_limit,omitempty" validate:"omitempty,min=1,max=10000"` // milliseconds; submissions run under Judge0's 10s default wall_time_limit
+	MemoryLimit int                     `json:"memory_limit,omitempty" validate:"omitempty,min=2,max=500"` // MB; Judge0 accepts 2048-512000 KB
 }
 
 type CreateTestCaseRequest struct {

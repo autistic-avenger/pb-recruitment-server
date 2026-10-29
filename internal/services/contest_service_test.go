@@ -168,3 +168,34 @@ func TestConsolidateContestService(t *testing.T) {
 		}
 	})
 }
+
+func TestGetLeaderboard(t *testing.T) {
+	now := time.Now().UnixMilli()
+	for _, tc := range []struct {
+		name       string
+		start, end int64
+		lookupErr  error
+		wantErr    error
+		wantCalled bool
+	}{
+		{"upcoming", now + 60_000, now + 120_000, nil, common.ErrContestNotStarted, false},
+		{"running", now - 60_000, now + 60_000, nil, nil, true},
+		{"ended", now - 120_000, now - 60_000, nil, nil, true},
+		{"not found", 0, 0, common.ContestNotFoundError, common.ContestNotFoundError, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			storage := &stores.Storage{
+				Contests: problemContestTestStore{start: tc.start, end: tc.end, err: tc.lookupErr},
+				Rankings: serviceRankingTestStore{leaderboardFunc: func(_ context.Context, _ string, page int) (*dto.GetLeaderboardResponse, error) {
+					called = true
+					return &dto.GetLeaderboardResponse{Page: page}, nil
+				}},
+			}
+			_, err := NewContestService(storage, nil).GetLeaderboard(context.Background(), "c1", 1)
+			if !errors.Is(err, tc.wantErr) || called != tc.wantCalled {
+				t.Fatalf("err = %v, ranking store called = %v", err, called)
+			}
+		})
+	}
+}

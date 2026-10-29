@@ -1726,6 +1726,15 @@ const docTemplate = `{
                             }
                         }
                     },
+                    "403": {
+                        "description": "Contest has not started yet",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
                     "404": {
                         "description": "Contest not found",
                         "schema": {
@@ -2882,7 +2891,10 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "memory_limit": {
-                    "type": "integer"
+                    "description": "MB; Judge0 accepts 2048-512000 KB",
+                    "type": "integer",
+                    "maximum": 500,
+                    "minimum": 2
                 },
                 "name": {
                     "type": "string"
@@ -2904,7 +2916,10 @@ const docTemplate = `{
                     }
                 },
                 "time_limit": {
-                    "type": "integer"
+                    "description": "milliseconds; submissions run under Judge0's 10s default wall_time_limit",
+                    "type": "integer",
+                    "maximum": 10000,
+                    "minimum": 1
                 },
                 "type": {
                     "enum": [
@@ -3250,10 +3265,16 @@ const docTemplate = `{
                 "id": {
                     "type": "string"
                 },
+                "memory_limit": {
+                    "type": "integer"
+                },
                 "name": {
                     "type": "string"
                 },
                 "score": {
+                    "type": "integer"
+                },
+                "time_limit": {
                     "type": "integer"
                 },
                 "type": {

@@ -389,7 +389,6 @@ func TestProblemVisibilityBeforeStartAndRegistration(t *testing.T) {
 	}
 }
 
-
 func TestHandleUpdateLeaderboardUser(t *testing.T) {
 	t.Run("success update user", func(t *testing.T) {
 		var calledContestID, calledUserID string
@@ -499,6 +498,84 @@ func TestHandleUpdateLeaderboardUser(t *testing.T) {
 		}
 		if recorder.Code != http.StatusInternalServerError {
 			t.Fatalf("HTTP %d, want 500: %s", recorder.Code, recorder.Body.String())
+		}
+	})
+}
+
+func TestGetLeaderboardController(t *testing.T) {
+	now := time.Now().UnixMilli()
+
+	t.Run("returns 403 when contest is upcoming", func(t *testing.T) {
+		storage := &stores.Storage{
+			Contests: submissionContestStore{
+				contest: models.Contest{ID: "c1", StartTime: now + 60_000, EndTime: now + 120_000},
+			},
+			Rankings: &mockRankingStore{},
+		}
+		controller := NewContestController(services.NewContestService(storage, nil), nil)
+		recorder := httptest.NewRecorder()
+		ctx := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/contests/c1/leaderboard", nil), recorder)
+		ctx.SetParamNames("id")
+		ctx.SetParamValues("c1")
+
+		if err := controller.GetLeaderboard(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("expected status 403, got %d: %s", recorder.Code, recorder.Body.String())
+		}
+	})
+
+	t.Run("returns 404 when contest is not found", func(t *testing.T) {
+		storage := &stores.Storage{
+			Contests: submissionContestStore{err: common.ContestNotFoundError},
+			Rankings: &mockRankingStore{},
+		}
+		controller := NewContestController(services.NewContestService(storage, nil), nil)
+		recorder := httptest.NewRecorder()
+		ctx := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/contests/c999/leaderboard", nil), recorder)
+		ctx.SetParamNames("id")
+		ctx.SetParamValues("c999")
+
+		if err := controller.GetLeaderboard(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("expected status 404, got %d: %s", recorder.Code, recorder.Body.String())
+		}
+	})
+
+	t.Run("returns 200 with entries and headers when contest is running", func(t *testing.T) {
+		rankStore := &mockRankingStore{
+			leaderboardFunc: func(_ context.Context, contestID string, page int) (*dto.GetLeaderboardResponse, error) {
+				return &dto.GetLeaderboardResponse{
+					Entries:    []dto.LeaderboardEntry{},
+					TotalCount: 5,
+					TotalPages: 1,
+					Page:       page,
+				}, nil
+			},
+		}
+		storage := &stores.Storage{
+			Contests: submissionContestStore{
+				contest: models.Contest{ID: "c1", StartTime: now - 60_000, EndTime: now + 60_000},
+			},
+			Rankings: rankStore,
+		}
+		controller := NewContestController(services.NewContestService(storage, nil), nil)
+		recorder := httptest.NewRecorder()
+		ctx := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/contests/c1/leaderboard?page=1", nil), recorder)
+		ctx.SetParamNames("id")
+		ctx.SetParamValues("c1")
+
+		if err := controller.GetLeaderboard(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", recorder.Code, recorder.Body.String())
+		}
+		if recorder.Header().Get("X-Total-Count") != "5" {
+			t.Fatalf("expected X-Total-Count 5, got %s", recorder.Header().Get("X-Total-Count"))
 		}
 	})
 }
