@@ -1,7 +1,6 @@
 package services
 
 import (
-	"errors"
 	"app/internal/common"
 	"app/internal/models"
 	"app/internal/models/dto"
@@ -270,20 +269,13 @@ func (cs *ContestService) UpdateLeaderboardUser(ctx context.Context, contestID s
 }
 
 func (cs *ContestService) GetLeaderboard(ctx context.Context, contestID string, page int) (*dto.GetLeaderboardResponse, error) {
-	if cs.stores == nil || cs.stores.Rankings == nil {
-		return nil, errors.New("ranking store not configured")
+	contest, err := cs.stores.Contests.GetContest(ctx, contestID)
+	if err != nil {
+		return nil, err
 	}
-
-	if cs.stores.Contests != nil {
-		contest, err := cs.stores.Contests.GetContest(ctx, contestID)
-		if err != nil {
-			return nil, err
-		}
-		if contest.GetRunningStatus() == models.ContestRunningUpcoming {
-			return nil, common.ErrContestNotStarted
-		}
+	if contest.GetRunningStatus() == models.ContestRunningUpcoming {
+		return nil, common.ErrContestNotStarted
 	}
-
 	return cs.stores.Rankings.GetLeaderboard(ctx, contestID, page)
 }
 

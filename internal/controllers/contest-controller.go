@@ -918,7 +918,7 @@ func (cc *ContestController) GetLeaderboard(ctx echo.Context) error {
 				"error": common.ContestNotFoundError.Error(),
 			})
 		}
-		if errors.Is(err, common.ErrContestNotStarted) || errors.Is(err, common.ContestNotRunningError) {
+		if errors.Is(err, common.ErrContestNotStarted) {
 			return ctx.JSON(http.StatusForbidden, map[string]string{
 				"error": err.Error(),
 			})

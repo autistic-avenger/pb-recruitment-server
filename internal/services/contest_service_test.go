@@ -169,85 +169,33 @@ func TestConsolidateContestService(t *testing.T) {
 	})
 }
 
-
 func TestGetLeaderboard(t *testing.T) {
 	now := time.Now().UnixMilli()
-
-	t.Run("fails when contest is upcoming", func(t *testing.T) {
-		storage := &stores.Storage{
-			Contests: problemContestTestStore{start: now + 60_000, end: now + 120_000},
-			Rankings: serviceRankingTestStore{},
-		}
-		svc := NewContestService(storage, nil)
-		_, err := svc.GetLeaderboard(context.Background(), "upcoming-contest", 1)
-		if !errors.Is(err, common.ErrContestNotStarted) {
-			t.Errorf("expected ErrContestNotStarted, got %v", err)
-		}
-	})
-
-	t.Run("succeeds when contest is running", func(t *testing.T) {
-		called := false
-		rankStore := serviceRankingTestStore{
-			leaderboardFunc: func(_ context.Context, contestID string, page int) (*dto.GetLeaderboardResponse, error) {
-				called = true
-				return &dto.GetLeaderboardResponse{
-					Entries:    []dto.LeaderboardEntry{},
-					TotalCount: 0,
-					TotalPages: 0,
-					Page:       page,
-				}, nil
-			},
-		}
-		storage := &stores.Storage{
-			Contests: problemContestTestStore{start: now - 60_000, end: now + 60_000},
-			Rankings: rankStore,
-		}
-		svc := NewContestService(storage, nil)
-		res, err := svc.GetLeaderboard(context.Background(), "running-contest", 1)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !called || res == nil {
-			t.Errorf("expected ranking store to be called")
-		}
-	})
-
-	t.Run("succeeds when contest has ended", func(t *testing.T) {
-		called := false
-		rankStore := serviceRankingTestStore{
-			leaderboardFunc: func(_ context.Context, contestID string, page int) (*dto.GetLeaderboardResponse, error) {
-				called = true
-				return &dto.GetLeaderboardResponse{
-					Entries:    []dto.LeaderboardEntry{},
-					TotalCount: 0,
-					TotalPages: 0,
-					Page:       page,
-				}, nil
-			},
-		}
-		storage := &stores.Storage{
-			Contests: problemContestTestStore{start: now - 120_000, end: now - 60_000},
-			Rankings: rankStore,
-		}
-		svc := NewContestService(storage, nil)
-		res, err := svc.GetLeaderboard(context.Background(), "ended-contest", 1)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !called || res == nil {
-			t.Errorf("expected ranking store to be called")
-		}
-	})
-
-	t.Run("fails when contest is not found", func(t *testing.T) {
-		storage := &stores.Storage{
-			Contests: problemContestTestStore{err: common.ContestNotFoundError},
-			Rankings: serviceRankingTestStore{},
-		}
-		svc := NewContestService(storage, nil)
-		_, err := svc.GetLeaderboard(context.Background(), "missing-contest", 1)
-		if !errors.Is(err, common.ContestNotFoundError) {
-			t.Errorf("expected ContestNotFoundError, got %v", err)
-		}
-	})
+	for _, tc := range []struct {
+		name       string
+		start, end int64
+		lookupErr  error
+		wantErr    error
+		wantCalled bool
+	}{
+		{"upcoming", now + 60_000, now + 120_000, nil, common.ErrContestNotStarted, false},
+		{"running", now - 60_000, now + 60_000, nil, nil, true},
+		{"ended", now - 120_000, now - 60_000, nil, nil, true},
+		{"not found", 0, 0, common.ContestNotFoundError, common.ContestNotFoundError, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			storage := &stores.Storage{
+				Contests: problemContestTestStore{start: tc.start, end: tc.end, err: tc.lookupErr},
+				Rankings: serviceRankingTestStore{leaderboardFunc: func(_ context.Context, _ string, page int) (*dto.GetLeaderboardResponse, error) {
+					called = true
+					return &dto.GetLeaderboardResponse{Page: page}, nil
+				}},
+			}
+			_, err := NewContestService(storage, nil).GetLeaderboard(context.Background(), "c1", 1)
+			if !errors.Is(err, tc.wantErr) || called != tc.wantCalled {
+				t.Fatalf("err = %v, ranking store called = %v", err, called)
+			}
+		})
+	}
 }

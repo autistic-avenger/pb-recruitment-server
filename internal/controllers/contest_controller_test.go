@@ -389,7 +389,6 @@ func TestProblemVisibilityBeforeStartAndRegistration(t *testing.T) {
 	}
 }
 
-
 func TestHandleUpdateLeaderboardUser(t *testing.T) {
 	t.Run("success update user", func(t *testing.T) {
 		var calledContestID, calledUserID string
@@ -502,7 +501,6 @@ func TestHandleUpdateLeaderboardUser(t *testing.T) {
 		}
 	})
 }
-
 
 func TestGetLeaderboardController(t *testing.T) {
 	now := time.Now().UnixMilli()
