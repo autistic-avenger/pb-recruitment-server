@@ -57,6 +57,22 @@ func TestCreateProblemRequestTestcaseValidation(t *testing.T) {
 			Name: "p", Description: "d", Score: 10, Type: "mcq",
 			Answer: []int{0}, Options: []string{"only one"},
 		}, true},
+		{"limits at Judge0 maximum", CreateProblemRequest{
+			Name: "p", Description: "d", Score: 10, Type: "code",
+			Testcases: []CreateTestCaseRequest{{}}, TimeLimit: 10000, MemoryLimit: 500,
+		}, false},
+		{"time limit above Judge0 maximum", CreateProblemRequest{
+			Name: "p", Description: "d", Score: 10, Type: "code",
+			Testcases: []CreateTestCaseRequest{{}}, TimeLimit: 10001,
+		}, true},
+		{"memory limit above Judge0 maximum", CreateProblemRequest{
+			Name: "p", Description: "d", Score: 10, Type: "code",
+			Testcases: []CreateTestCaseRequest{{}}, MemoryLimit: 501,
+		}, true},
+		{"negative limit", CreateProblemRequest{
+			Name: "p", Description: "d", Score: 10, Type: "code",
+			Testcases: []CreateTestCaseRequest{{}}, TimeLimit: -1,
+		}, true},
 	}
 
 	for _, tc := range cases {

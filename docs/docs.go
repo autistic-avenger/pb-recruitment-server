@@ -2891,7 +2891,10 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "memory_limit": {
-                    "type": "integer"
+                    "description": "MB; Judge0 max_memory_limit is 512000 KB",
+                    "type": "integer",
+                    "maximum": 500,
+                    "minimum": 1
                 },
                 "name": {
                     "type": "string"
@@ -2913,7 +2916,10 @@ const docTemplate = `{
                     }
                 },
                 "time_limit": {
-                    "type": "integer"
+                    "description": "milliseconds; submissions run under Judge0's 10s default wall_time_limit",
+                    "type": "integer",
+                    "maximum": 10000,
+                    "minimum": 1
                 },
                 "type": {
                     "enum": [
